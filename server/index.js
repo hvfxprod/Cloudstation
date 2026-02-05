@@ -257,6 +257,38 @@ app.get('/api/raid', async (req, res) => {
   }
 });
 
+// ---------- 네트워크 정보 (서버 기준) ----------
+app.get('/api/network', async (req, res) => {
+  try {
+    const hostname = os.hostname();
+    const ifaces = os.networkInterfaces() || {};
+    const interfaces = [];
+    for (const [name, addrs] of Object.entries(ifaces)) {
+      if (!Array.isArray(addrs)) continue;
+      for (const a of addrs) {
+        if (a.family === 'IPv4' && !a.internal) {
+          interfaces.push({ name, address: a.address, family: a.family, mac: a.mac || null });
+        }
+      }
+    }
+    let dns = [];
+    try {
+      const resolv = await fs.readFile('/etc/resolv.conf', 'utf8');
+      const lines = resolv.split('\n');
+      for (const line of lines) {
+        const m = line.trim().match(/^nameserver\s+(\S+)/i);
+        if (m) dns.push(m[1]);
+      }
+    } catch {
+      // Windows or no resolv.conf
+    }
+    res.json({ hostname, interfaces, dns });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ---------- AI Assistant: API Key 암호화 저장 / 채팅 프록시 ----------
 app.get('/api/settings/gemini-key', async (req, res) => {
   try {

@@ -20,6 +20,12 @@ const ControlPanel: React.FC = () => {
   const [storageUsedTb, setStorageUsedTb] = useState<number | null>(null);
   const [storageTotalTb, setStorageTotalTb] = useState<number | null>(null);
   const [raidArrays, setRaidArrays] = useState<{ name: string; level: string; summary: string; detail?: string }[]>([]);
+  const [networkData, setNetworkData] = useState<{
+    hostname: string;
+    interfaces: { name: string; address: string; family: string; mac?: string | null }[];
+    dns: string[];
+  } | null>(null);
+  const [networkLoading, setNetworkLoading] = useState(false);
 
   useEffect(() => {
     const fetchSystem = async () => {
@@ -74,6 +80,19 @@ const ControlPanel: React.FC = () => {
   useEffect(() => {
     if (activeTab === 'ai-assistant') {
       getGeminiKeySet().then(setGeminiKeySet);
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (activeTab === 'network') {
+      setNetworkLoading(true);
+      fetch('/api/network')
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          setNetworkData(data || null);
+        })
+        .catch(() => setNetworkData(null))
+        .finally(() => setNetworkLoading(false));
     }
   }, [activeTab]);
 
@@ -273,29 +292,52 @@ const ControlPanel: React.FC = () => {
       case 'network':
         return (
           <div className="space-y-6 animate-in fade-in duration-300">
-             <h1 className="text-2xl font-bold text-slate-800 mb-6">Network Settings</h1>
-             <div className="bg-white p-6 rounded-2xl border border-slate-200 space-y-4">
-               <div className="flex justify-between items-center p-3 hover:bg-slate-50 rounded-xl transition-colors">
-                  <div className="flex items-center gap-3">
-                    <Wifi size={20} className="text-blue-500" />
-                    <div>
-                      <p className="font-bold">Wi-Fi Connection</p>
-                      <p className="text-xs text-slate-400">Connected to CloudNet_5G</p>
+            <h1 className="text-2xl font-bold text-slate-800 mb-6">Network Settings</h1>
+            <div className="bg-white p-6 rounded-2xl border border-slate-200 space-y-4">
+              {networkLoading && (
+                <p className="text-sm text-slate-500">Loading...</p>
+              )}
+              {!networkLoading && networkData && (
+                <>
+                  <div className="flex justify-between items-center p-3 hover:bg-slate-50 rounded-xl transition-colors">
+                    <div className="flex items-center gap-3">
+                      <Wifi size={20} className="text-blue-500" />
+                      <div>
+                        <p className="font-bold">Hostname</p>
+                        <p className="text-xs text-slate-400 font-mono">{networkData.hostname}</p>
+                      </div>
                     </div>
                   </div>
-                  <span className="text-xs font-bold text-blue-600">Active</span>
-               </div>
-               <div className="flex justify-between items-center p-3 hover:bg-slate-50 rounded-xl transition-colors">
-                  <div className="flex items-center gap-3">
-                    <Globe size={20} className="text-slate-400" />
-                    <div>
-                      <p className="font-bold">DNS Server</p>
-                      <p className="text-xs text-slate-400">8.8.8.8 (Google Public DNS)</p>
+                  {networkData.interfaces.length > 0 && (
+                    <div className="p-3">
+                      <p className="font-bold text-slate-800 mb-2">Network Interfaces</p>
+                      <ul className="space-y-2">
+                        {networkData.interfaces.map((iface, i) => (
+                          <li key={`${iface.name}-${i}`} className="flex justify-between items-center py-2 border-b border-slate-100 last:border-0">
+                            <span className="text-sm font-medium text-slate-700">{iface.name}</span>
+                            <span className="text-xs font-mono text-slate-500">{iface.address}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  <div className="flex justify-between items-center p-3 hover:bg-slate-50 rounded-xl transition-colors">
+                    <div className="flex items-center gap-3">
+                      <Globe size={20} className="text-slate-400" />
+                      <div>
+                        <p className="font-bold">DNS Servers</p>
+                        <p className="text-xs text-slate-400 font-mono">
+                          {networkData.dns.length > 0 ? networkData.dns.join(', ') : '—'}
+                        </p>
+                      </div>
                     </div>
                   </div>
-                  <button className="text-xs font-bold text-slate-500 bg-slate-100 px-3 py-1 rounded-lg">Edit</button>
-               </div>
-             </div>
+                </>
+              )}
+              {!networkLoading && !networkData && (
+                <p className="text-sm text-slate-500">서버에서 네트워크 정보를 불러올 수 없습니다.</p>
+              )}
+            </div>
           </div>
         );
       default:
