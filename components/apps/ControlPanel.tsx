@@ -3,14 +3,15 @@ import React, { useState, useEffect } from 'react';
 import { 
   Activity, Database, Users, Shield, Globe, Cpu, RefreshCw, UserPlus, ShieldAlert, Key, Globe2, Monitor, Wifi, Palette, Bot
 } from 'lucide-react';
-import { useOSStore } from '../../store';
+import { useOSStore, type ThemeMode } from '../../store';
 import { getGeminiKeySet, saveGeminiKey } from '../../lib/ai';
+import { BACKGROUND_PRESETS } from '../../lib/customization';
 import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip } from 'recharts';
 
 type TabID = 'health' | 'users' | 'security' | 'display' | 'network' | 'update' | 'ai-assistant';
 
 const ControlPanel: React.FC = () => {
-  const { addNotification } = useOSStore();
+  const { addNotification, theme, background, backgroundCustomUrl, setTheme, setBackground, setBackgroundCustomUrl } = useOSStore();
   const [activeTab, setActiveTab] = useState<TabID>('health');
   const [aiApiKeyInput, setAiApiKeyInput] = useState('');
   const [geminiKeySet, setGeminiKeySet] = useState<boolean | null>(null);
@@ -20,10 +21,12 @@ const ControlPanel: React.FC = () => {
   const [storageUsedTb, setStorageUsedTb] = useState<number | null>(null);
   const [storageTotalTb, setStorageTotalTb] = useState<number | null>(null);
   const [raidArrays, setRaidArrays] = useState<{ name: string; level: string; summary: string; detail?: string }[]>([]);
+  const [systemSource, setSystemSource] = useState<string | null>(null);
   const [networkData, setNetworkData] = useState<{
     hostname: string;
     interfaces: { name: string; address: string; family: string; mac?: string | null }[];
     dns: string[];
+    networkStats?: { byInterface: Record<string, number>; source: string };
   } | null>(null);
   const [networkLoading, setNetworkLoading] = useState(false);
 
@@ -52,6 +55,7 @@ const ControlPanel: React.FC = () => {
           setStorageUsedTb(usedTb);
           setStorageTotalTb(totalTb);
         }
+        if (data.source) setSystemSource(data.source);
       } catch {
         // ignore; keep last values
       }
@@ -101,11 +105,16 @@ const ControlPanel: React.FC = () => {
       case 'health':
         return (
           <div className="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between flex-wrap gap-2">
               <h1 className="text-2xl font-bold text-slate-800">System Overview</h1>
-              <div className="flex items-center gap-2 bg-emerald-100 text-emerald-700 px-3 py-1 rounded-full text-xs font-bold">
-                <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-                System Healthy
+              <div className="flex items-center gap-2 flex-wrap">
+                {systemSource === 'netdata' && (
+                  <span className="bg-sky-100 text-sky-700 px-3 py-1 rounded-full text-xs font-bold">Netdata</span>
+                )}
+                <div className="flex items-center gap-2 bg-emerald-100 text-emerald-700 px-3 py-1 rounded-full text-xs font-bold">
+                  <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
+                  System Healthy
+                </div>
               </div>
             </div>
 
@@ -235,15 +244,73 @@ const ControlPanel: React.FC = () => {
       case 'display':
         return (
           <div className="space-y-6 animate-in fade-in duration-300">
-             <h1 className="text-2xl font-bold text-slate-800 mb-6">Display & Theme</h1>
-             <div className="bg-white p-6 rounded-2xl border border-slate-200">
-               <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Palette size={18} /> Theme Settings</h3>
-               <div className="grid grid-cols-3 gap-4">
-                 <div className="aspect-video rounded-xl bg-slate-800 border-4 border-blue-500 cursor-pointer flex items-center justify-center text-white text-xs font-bold">Dark Mode</div>
-                 <div className="aspect-video rounded-xl bg-slate-200 border border-slate-300 cursor-pointer flex items-center justify-center text-slate-500 text-xs font-bold">Light Mode</div>
-                 <div className="aspect-video rounded-xl bg-gradient-to-br from-blue-500 to-purple-500 border border-slate-300 cursor-pointer flex items-center justify-center text-white text-xs font-bold">Dynamic</div>
-               </div>
-             </div>
+            <h1 className="text-2xl font-bold text-slate-800 mb-6">Display & Theme</h1>
+
+            <div className="bg-white p-6 rounded-2xl border border-slate-200">
+              <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Palette size={18} /> Theme</h3>
+              <p className="text-sm text-slate-500 mb-4">데스크톱 오버레이와 가독성을 조정합니다.</p>
+              <div className="grid grid-cols-3 gap-4">
+                {([
+                  { id: 'light' as ThemeMode, label: 'Light', desc: '밝은 오버레이', className: 'bg-slate-200 text-slate-700 border-slate-300' },
+                  { id: 'dark' as ThemeMode, label: 'Dark', desc: '어두운 오버레이', className: 'bg-slate-800 text-white border-slate-600' },
+                  { id: 'dynamic' as ThemeMode, label: 'Dynamic', desc: '시스템 설정 따름', className: 'bg-gradient-to-br from-blue-500 to-purple-600 text-white border-slate-400' },
+                ]).map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => { setTheme(opt.id); addNotification('적용됨', `테마: ${opt.label}`, 'success'); }}
+                    className={`aspect-video rounded-xl border-2 flex flex-col items-center justify-center gap-1 transition-all hover:scale-[1.02] ${theme === opt.id ? 'ring-2 ring-blue-500 ring-offset-2 border-blue-500' : 'border-slate-300'} ${opt.className}`}
+                  >
+                    <span className="text-sm font-bold">{opt.label}</span>
+                    <span className="text-[10px] opacity-90">{opt.desc}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="bg-white p-6 rounded-2xl border border-slate-200">
+              <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Monitor size={18} /> Background</h3>
+              <p className="text-sm text-slate-500 mb-4">데스크톱 배경을 선택하세요.</p>
+              <div className="grid grid-cols-4 gap-3">
+                {BACKGROUND_PRESETS.map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={() => { setBackground(preset.id); addNotification('적용됨', `배경: ${preset.label}`, 'success'); }}
+                    className={`rounded-xl h-16 border-2 overflow-hidden transition-all hover:scale-[1.03] ${background === preset.id ? 'ring-2 ring-blue-500 ring-offset-2 border-blue-500' : 'border-slate-200'}`}
+                    style={preset.style}
+                    title={preset.label}
+                  >
+                    <span className="text-xs font-bold drop-shadow-md text-white bg-black/30 px-1.5 py-0.5 rounded">{preset.label}</span>
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setBackground('custom')}
+                  className={`rounded-xl h-16 border-2 border-dashed flex flex-col items-center justify-center text-slate-500 text-xs font-medium transition-all hover:bg-slate-50 ${background === 'custom' ? 'ring-2 ring-blue-500 ring-offset-2 border-blue-500 bg-blue-50' : 'border-slate-300'}`}
+                >
+                  Custom URL
+                </button>
+              </div>
+              {background === 'custom' && (
+                <div className="mt-4 flex gap-2">
+                  <input
+                    type="url"
+                    value={backgroundCustomUrl}
+                    onChange={(e) => setBackgroundCustomUrl(e.target.value)}
+                    placeholder="https://example.com/image.jpg"
+                    className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => { setBackgroundCustomUrl(backgroundCustomUrl); addNotification('적용됨', '배경 URL이 적용되었습니다.', 'success'); }}
+                    className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+                  >
+                    적용
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         );
       case 'ai-assistant':
@@ -332,6 +399,21 @@ const ControlPanel: React.FC = () => {
                       </div>
                     </div>
                   </div>
+                  {networkData.networkStats?.byInterface && Object.keys(networkData.networkStats.byInterface).length > 0 && (
+                    <div className="p-3 border-t border-slate-100">
+                      <p className="font-bold text-slate-800 mb-2 flex items-center gap-2">
+                        Traffic (Netdata)
+                      </p>
+                      <ul className="space-y-1.5">
+                        {Object.entries(networkData.networkStats.byInterface).map(([label, value]) => (
+                          <li key={label} className="flex justify-between items-center text-sm">
+                            <span className="font-mono text-slate-600">{label}</span>
+                            <span className="text-slate-500">{typeof value === 'number' ? value.toLocaleString() : value}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </>
               )}
               {!networkLoading && !networkData && (

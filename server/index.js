@@ -17,6 +17,7 @@ const DATA_PATH = process.env.DATA_PATH || path.join(__dirname, 'data');
 const SHARES_FILE = process.env.SHARES_FILE || path.join(__dirname, 'shares.json');
 const GEMINI_KEY_FILE = process.env.GEMINI_KEY_FILE || path.join(__dirname, '.gemini_key.enc');
 const ENCRYPTION_SECRET = process.env.ENCRYPTION_SECRET || 'cloudstation-gemini-key-secret-change-in-production';
+const NETDATA_URL = (process.env.NETDATA_URL || '').replace(/\/$/, '');
 
 const ALGO = 'aes-256-gcm';
 const IV_LEN = 16;
@@ -180,39 +181,160 @@ app.post('/api/fs/folder', async (req, res) => {
   }
 });
 
+// ---------- Netdata API (선택) ----------
+async function fetchNetdataJson(pathname) {
+  if (!NETDATA_URL) return null;
+  try {
+    const url = `${NETDATA_URL}${pathname}`;
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 5000);
+    const r = await fetch(url, { signal: ctrl.signal });
+    clearTimeout(t);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch {
+    return null;
+  }
+}
+
+/** Netdata v1/data 응답: 첫 열이 시간이면 제외. [time, dim1, dim2, ...] — 라벨 또는 값으로 시간 열 판별 */
+function netdataRowValues(labels, row) {
+  if (!Array.isArray(labels) || !Array.isArray(row)) return { labels: [], values: [] };
+  const firstVal = Number(row[0]);
+  const looksLikeTime = Number.isFinite(firstVal) && firstVal > 1e9 && firstVal < 2e9;
+  const labelIsTime = labels[0] != null && /^time$/i.test(String(labels[0]).trim());
+  const offset = labelIsTime || looksLikeTime ? 1 : 0;
+  return {
+    labels: labels.slice(offset),
+    values: row.slice(offset),
+  };
+}
+
+/** Netdata에서 시스템 메트릭 가져오기. 실패 시 null. */
+async function getSystemFromNetdata() {
+  // jsonwrap 사용 시 latest_values / dimension_names 제공되면 시간 열 없이 사용 가능
+  const [cpuRes, ramRes] = await Promise.all([
+    fetchNetdataJson('/api/v1/data?context=system.cpu&points=1&format=json&options=jsonwrap'),
+    fetchNetdataJson('/api/v1/data?context=system.ram&points=1&format=json&options=jsonwrap'),
+  ]);
+
+  const cpuNames = cpuRes?.dimension_names || cpuRes?.labels || [];
+  const cpuValues = cpuRes?.latest_values ?? (cpuRes?.data?.length ? cpuRes.data[cpuRes.data.length - 1] : null);
+  if (!Array.isArray(cpuValues)) return null;
+
+  const cpuPair = Array.isArray(cpuRes?.latest_values)
+    ? (() => {
+        const names = cpuNames || [];
+        const vals = cpuRes.latest_values;
+        const skip = names[0] != null && /^time$/i.test(String(names[0])) ? 1 : 0;
+        return { labels: names.slice(skip), values: vals.slice(skip) };
+      })()
+    : netdataRowValues(cpuNames, cpuValues);
+  const { labels: cpuLabels, values: cpuV } = cpuPair;
+  let totalCpu = 0;
+  let idle = 0;
+  cpuLabels.forEach((label, i) => {
+    const v = Number(cpuV[i]);
+    if (Number.isFinite(v)) {
+      totalCpu += v;
+      if (/idle/i.test(String(label))) idle = v;
+    }
+  });
+  let cpuPercent = totalCpu > 0 ? Math.max(0, Math.min(100, 100 - (idle / totalCpu) * 100)) : null;
+  if (cpuPercent != null && (cpuPercent >= 99.5 || cpuPercent <= 0.5)) cpuPercent = null;
+
+  const ramNames = ramRes?.dimension_names || ramRes?.labels || [];
+  const ramValues = ramRes?.latest_values ?? (ramRes?.data?.length ? ramRes.data[ramRes.data.length - 1] : null);
+  if (!Array.isArray(ramValues)) return null;
+
+  const ramPair = Array.isArray(ramRes?.latest_values)
+    ? (() => {
+        const names = ramNames || [];
+        const vals = ramRes.latest_values;
+        const skip = names[0] != null && /^time$/i.test(String(names[0])) ? 1 : 0;
+        return { labels: names.slice(skip), values: vals.slice(skip) };
+      })()
+    : netdataRowValues(ramNames, ramValues);
+  const { labels: ramLabels, values: ramV } = ramPair;
+  let usedBytes = 0;
+  let freeBytes = 0;
+  let cachedBytes = 0;
+  ramLabels.forEach((label, i) => {
+    const v = Number(ramV[i]);
+    if (!Number.isFinite(v)) return;
+    const l = String(label).toLowerCase().replace(/\s+/g, ' ');
+    if (l === 'used' || l === 'used ram' || l === 'applications') usedBytes = v;
+    else if (l === 'free') freeBytes = v;
+    else if (l === 'cached') cachedBytes = v;
+  });
+  const toBytes = (x) => (x > 0 && x < 1e9 ? x * 1024 : x);
+  usedBytes = toBytes(usedBytes);
+  freeBytes = toBytes(freeBytes);
+  cachedBytes = toBytes(cachedBytes);
+  const totalBytes = usedBytes + freeBytes + cachedBytes || usedBytes + freeBytes;
+  if (totalBytes === 0 || usedBytes === 0) return null;
+  if (cpuPercent == null) return null;
+
+  return {
+    cpu: { percent: cpuPercent },
+    memory: { totalBytes, usedBytes },
+    storage: null,
+    source: 'netdata',
+  };
+}
+
+/** Netdata에서 네트워크 메트릭(옵션) 가져오기. hostname/인터페이스 목록은 os 기반 유지. */
+async function getNetworkStatsFromNetdata() {
+  const res = await fetchNetdataJson('/api/v1/data?context=net.net&points=1&format=json');
+  if (!res?.data?.length || !Array.isArray(res.labels)) return null;
+  const row = res.data[res.data.length - 1] || [];
+  const labels = res.labels;
+  const byInterface = {};
+  labels.forEach((label, i) => {
+    const v = Number(row[i]);
+    if (Number.isFinite(v) && label) byInterface[label] = v;
+  });
+  return Object.keys(byInterface).length ? { byInterface, source: 'netdata' } : null;
+}
+
 // ---------- 시스템 정보 ----------
 app.get('/api/system', async (req, res) => {
   try {
-    const totalMem = os.totalmem();
-    const freeMem = os.freemem();
-    const usedMem = totalMem - freeMem;
-
-    const cpus = os.cpus?.() || [];
-    const load = os.loadavg?.()[0] ?? 0;
-    const cpuPercent = cpus.length ? Math.max(0, Math.min(100, (load / cpus.length) * 100)) : null;
-
-    let storage = null;
-    try {
-      const info = await checkDiskSpace(DATA_PATH);
-      const usedBytes = info.size - info.free;
-      storage = {
-        path: DATA_PATH,
-        totalBytes: info.size,
-        usedBytes,
+    let payload = await getSystemFromNetdata();
+    if (!payload) {
+      const totalMem = os.totalmem();
+      const freeMem = os.freemem();
+      const usedMem = totalMem - freeMem;
+      const cpus = os.cpus?.() || [];
+      const load = os.loadavg?.()[0] ?? 0;
+      const cpuPercent = cpus.length ? Math.max(0, Math.min(100, (load / cpus.length) * 100)) : null;
+      payload = {
+        cpu: { percent: cpuPercent },
+        memory: { totalBytes: totalMem, usedBytes: usedMem },
+        storage: null,
       };
-    } catch (e) {
-      console.warn('Failed to read disk space for', DATA_PATH, e?.message ?? e);
+    }
+
+    let storage = payload.storage;
+    if (storage == null) {
+      try {
+        const info = await checkDiskSpace(DATA_PATH);
+        const usedBytes = info.size - info.free;
+        storage = {
+          path: DATA_PATH,
+          totalBytes: info.size,
+          usedBytes,
+        };
+      } catch (e) {
+        console.warn('Failed to read disk space for', DATA_PATH, e?.message ?? e);
+      }
     }
 
     res.json({
       storage,
-      memory: {
-        totalBytes: totalMem,
-        usedBytes: usedMem,
-      },
-      cpu: {
-        percent: cpuPercent,
-      },
+      memory: payload.memory,
+      cpu: payload.cpu,
+      ...(payload.source && { source: payload.source }),
     });
   } catch (err) {
     console.error(err);
@@ -282,7 +404,10 @@ app.get('/api/network', async (req, res) => {
     } catch {
       // Windows or no resolv.conf
     }
-    res.json({ hostname, interfaces, dns });
+    const networkStats = await getNetworkStatsFromNetdata();
+    const payload = { hostname, interfaces, dns };
+    if (networkStats) payload.networkStats = networkStats;
+    res.json(payload);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });

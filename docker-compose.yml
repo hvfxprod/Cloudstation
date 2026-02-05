@@ -7,7 +7,44 @@ services:
     environment:
       - PORT=9999
       - DATA_PATH=/data
+      # Netdata가 호스트에서 19999로 떠 있을 때 (host 네트워크) 접근용
+      - NETDATA_URL=http://host.docker.internal:19999
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       # 호스트의 SMB 공유 경로를 컨테이너 /data 로 마운트
       - /mnt/Theh_1/SMB_Share:/data
     restart: unless-stopped
+
+  # Netdata: 호스트 CPU/RAM/디스크/네트워크 메트릭 수집 → Control Panel Health/Network에 연동
+  netdata:
+    image: netdata/netdata:stable
+    container_name: netdata
+    hostname: netdata
+    pid: host
+    network_mode: host
+    restart: unless-stopped
+    cap_add:
+      - SYS_PTRACE
+      - SYS_ADMIN
+    security_opt:
+      - apparmor=unconfined
+    volumes:
+      - netdataconfig:/etc/netdata
+      - netdatalib:/var/lib/netdata
+      - netdatacache:/var/cache/netdata
+      - /:/host/root:ro,rslave
+      - /etc/passwd:/host/etc/passwd:ro
+      - /etc/group:/host/etc/group:ro
+      - /etc/localtime:/etc/localtime:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /etc/os-release:/host/etc/os-release:ro
+      - /var/log:/host/var/log:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /run/dbus:/run/dbus:ro
+
+volumes:
+  netdataconfig:
+  netdatalib:
+  netdatacache:

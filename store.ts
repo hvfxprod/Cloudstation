@@ -2,14 +2,53 @@
 import { create } from 'zustand';
 import { AppID, WindowState, FileItem, SharedLink, Notification } from './types';
 
-interface OSState {
+export type ThemeMode = 'light' | 'dark' | 'dynamic';
+export type BackgroundPreset = string;
+
+const CUSTOMIZATION_KEY = 'cloudstation-customization';
+
+interface CustomizationState {
+  theme: ThemeMode;
+  background: BackgroundPreset;
+  backgroundCustomUrl: string;
+}
+
+function loadCustomization(): CustomizationState {
+  try {
+    const raw = localStorage.getItem(CUSTOMIZATION_KEY);
+    if (raw) {
+      const p = JSON.parse(raw) as Partial<CustomizationState>;
+      return {
+        theme: p.theme === 'dark' || p.theme === 'dynamic' ? p.theme : 'light',
+        background: typeof p.background === 'string' ? p.background : 'default',
+        backgroundCustomUrl: typeof p.backgroundCustomUrl === 'string' ? p.backgroundCustomUrl : '',
+      };
+    }
+  } catch {
+    // ignore
+  }
+  return { theme: 'light', background: 'default', backgroundCustomUrl: '' };
+}
+
+function saveCustomization(s: CustomizationState) {
+  try {
+    localStorage.setItem(CUSTOMIZATION_KEY, JSON.stringify(s));
+  } catch {
+    // ignore
+  }
+}
+
+interface OSState extends CustomizationState {
   windows: WindowState[];
   activeWindowId: AppID | null;
   files: FileItem[];
   sharedLinks: SharedLink[];
   notifications: Notification[];
   isStartMenuOpen: boolean;
-  
+
+  setTheme: (theme: ThemeMode) => void;
+  setBackground: (background: BackgroundPreset) => void;
+  setBackgroundCustomUrl: (url: string) => void;
   toggleStartMenu: () => void;
   openWindow: (id: AppID, title: string) => void;
   closeWindow: (id: AppID) => void;
@@ -31,7 +70,10 @@ interface OSState {
   removeNotification: (id: string) => void;
 }
 
-export const useOSStore = create<OSState>((set) => ({
+const initialCustom = loadCustomization();
+
+export const useOSStore = create<OSState>((set, get) => ({
+  ...initialCustom,
   windows: [],
   activeWindowId: null,
   isStartMenuOpen: false,
@@ -39,6 +81,21 @@ export const useOSStore = create<OSState>((set) => ({
   sharedLinks: [],
   notifications: [],
 
+  setTheme: (theme) => {
+    set({ theme });
+    const s = get();
+    saveCustomization({ theme: s.theme, background: s.background, backgroundCustomUrl: s.backgroundCustomUrl });
+  },
+  setBackground: (background) => {
+    set({ background });
+    const s = get();
+    saveCustomization({ theme: s.theme, background: s.background, backgroundCustomUrl: s.backgroundCustomUrl });
+  },
+  setBackgroundCustomUrl: (url) => {
+    set({ backgroundCustomUrl: url });
+    const s = get();
+    saveCustomization({ theme: s.theme, background: s.background, backgroundCustomUrl: url });
+  },
   toggleStartMenu: () => set((state) => ({ isStartMenuOpen: !state.isStartMenuOpen })),
 
   openWindow: (id, title) => set((state) => {
