@@ -1,0 +1,8 @@
+{
+  "name": "CloudStation Pro",
+  "description": "A sophisticated, DSM-inspired web operating system for seamless file management, sharing, and storage monitoring.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

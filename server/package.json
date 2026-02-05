@@ -1,0 +1,17 @@
+{
+  "name": "cloudstation-server",
+  "version": "1.0.0",
+  "description": "CloudStation Pro API server for file listing and download",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@google/genai": "^1.39.0",
+    "archiver": "^7.0.1",
+    "check-disk-space": "^3.4.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.0"
+  }
+}

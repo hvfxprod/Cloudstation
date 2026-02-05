@@ -1,0 +1,13 @@
+services:
+  cloudstation:
+    build: .
+    container_name: cloudstation-pro
+    ports:
+      - "9999:9999"
+    environment:
+      - PORT=9999
+      - DATA_PATH=/data
+    volumes:
+      # 호스트의 SMB 공유 경로를 컨테이너 /data 로 마운트
+      - /mnt/Theh_1/SMB_Share:/data
+    restart: unless-stopped
