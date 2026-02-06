@@ -28,6 +28,9 @@
 환경 변수(선택):
 - `DATA_PATH`: 컨테이너 내부 데이터 경로 (기본값: `/data`)
 - `PORT`: 서버 포트 (기본값: `9999`)
+- **TrueNAS 스토리지 풀 연동:** Control Panel Health 탭에서 TrueNAS 풀 상태를 보려면:
+  - `TRUENAS_URL`: TrueNAS 웹 UI 주소 (예: `https://192.168.1.10` 또는 `https://truenas.local`) — API 키 사용 시 HTTPS 권장
+  - `TRUENAS_API_KEY`: TrueNAS에서 발급한 API 키 (시스템 설정 → API 키에서 생성)
 
 다른 호스트 경로를 쓰려면 `docker-compose.yml`의 `volumes`를 수정하세요.
 본인의 SMB/파일 있는 위치를 Volumes 부분에 수정해서 사용하세요

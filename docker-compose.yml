@@ -7,13 +7,19 @@ services:
     environment:
       - PORT=9999
       - DATA_PATH=/data
+      # SFTP: 호스트에서 마운트 경로 (SFTP 컨테이너 Binds용)
+      - SFTP_HOST_MOUNT_ROOT=/mnt/Theh_1/SMB_Share
       # Netdata가 호스트에서 19999로 떠 있을 때 (host 네트워크) 접근용
       - NETDATA_URL=http://host.docker.internal:19999
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      # TrueNAS 풀 상태 표시 (Health 탭)
+      - TRUENAS_URL=https://server1.hvfxprod.com
+      - TRUENAS_API_KEY=1-Q4n7HTPxg441GCrWhgOQfu8ZhJsrqFVy1GYkroGBHuqLId5UWVeXquyV8MLSMIcV
     volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
       # 호스트의 SMB 공유 경로를 컨테이너 /data 로 마운트
       - /mnt/Theh_1/SMB_Share:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   # Netdata: 호스트 CPU/RAM/디스크/네트워크 메트릭 수집 → Control Panel Health/Network에 연동

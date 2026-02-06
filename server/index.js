@@ -3,11 +3,13 @@ import cors from 'cors';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createReadStream } from 'fs';
+import { createReadStream, readFileSync } from 'fs';
+import { execSync } from 'child_process';
 import archiver from 'archiver';
 import crypto from 'crypto';
 import os from 'os';
 import checkDiskSpace from 'check-disk-space';
+import Docker from 'dockerode';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -15,14 +17,39 @@ const PORT = process.env.PORT || 9000;
 
 const DATA_PATH = process.env.DATA_PATH || path.join(__dirname, 'data');
 const SHARES_FILE = process.env.SHARES_FILE || path.join(__dirname, 'shares.json');
+const SFTP_USERS_FILE = process.env.SFTP_USERS_FILE || path.join(DATA_PATH, '.sftp_users.json');
+const SFTP_CONTAINER_NAME = process.env.SFTP_CONTAINER_NAME || 'cloudstation-sftp';
+const SFTP_HOST_MOUNT_ROOT = process.env.SFTP_HOST_MOUNT_ROOT || DATA_PATH;
 const GEMINI_KEY_FILE = process.env.GEMINI_KEY_FILE || path.join(__dirname, '.gemini_key.enc');
 const ENCRYPTION_SECRET = process.env.ENCRYPTION_SECRET || 'cloudstation-gemini-key-secret-change-in-production';
 const NETDATA_URL = (process.env.NETDATA_URL || '').replace(/\/$/, '');
+const TRUENAS_URL = (process.env.TRUENAS_URL || '').replace(/\/$/, '');
+const TRUENAS_API_KEY = process.env.TRUENAS_API_KEY || '';
 
 const ALGO = 'aes-256-gcm';
 const IV_LEN = 16;
 const AUTH_TAG_LEN = 16;
 const KEY_LEN = 32;
+
+// In-memory log buffer for System Log tab (last 500 entries)
+const LOG_BUFFER_MAX = 500;
+const logBuffer = [];
+function formatLogArgs(args) {
+  return args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
+}
+function pushLog(level, args) {
+  const text = formatLogArgs(args);
+  logBuffer.push({ time: new Date().toISOString(), level, text });
+  if (logBuffer.length > LOG_BUFFER_MAX) logBuffer.shift();
+}
+(function patchConsole() {
+  const origLog = console.log;
+  const origWarn = console.warn;
+  const origError = console.error;
+  console.log = (...args) => { origLog.apply(console, args); pushLog('log', args); };
+  console.warn = (...args) => { origWarn.apply(console, args); pushLog('warn', args); };
+  console.error = (...args) => { origError.apply(console, args); pushLog('error', args); };
+})();
 
 function getEncryptionKey() {
   const buf = crypto.createHash('sha256').update(ENCRYPTION_SECRET, 'utf8').digest();
@@ -99,6 +126,78 @@ async function readShares() {
 
 async function writeShares(shares) {
   await fs.writeFile(SHARES_FILE, JSON.stringify(shares, null, 2), 'utf8');
+}
+
+// ---------- SFTP Store (users + pending + delete_pending + port) ----------
+const USERNAME_RE = /^[A-Za-z0-9._-]+$/;
+async function readSftpStore() {
+  try {
+    const raw = await fs.readFile(SFTP_USERS_FILE, 'utf8');
+    const data = JSON.parse(raw);
+    return {
+      users: Array.isArray(data.users) ? data.users : [],
+      pending: Array.isArray(data.pending) ? data.pending : [],
+      delete_pending: Array.isArray(data.delete_pending) ? data.delete_pending : [],
+      meta: data.meta && typeof data.meta === 'object' ? data.meta : { updated: '', port: 1014 },
+    };
+  } catch {
+    return { users: [], pending: [], delete_pending: [], meta: { updated: '', port: 1014 } };
+  }
+}
+
+async function writeSftpStore(state) {
+  const doc = {
+    users: state.users || [],
+    pending: state.pending || [],
+    delete_pending: state.delete_pending || [],
+    meta: state.meta || { updated: '', port: 1014 },
+  };
+  doc.meta.updated = new Date().toISOString();
+  await fs.mkdir(path.dirname(SFTP_USERS_FILE), { recursive: true }).catch(() => {});
+  await fs.writeFile(SFTP_USERS_FILE, JSON.stringify(doc, null, 2), 'utf8');
+}
+
+function getDocker() {
+  try {
+    return new Docker({ socketPath: '/var/run/docker.sock' });
+  } catch (e) {
+    return null;
+  }
+}
+
+async function removeSftpContainer(docker) {
+  try {
+    const c = docker.getContainer(SFTP_CONTAINER_NAME);
+    await c.remove({ force: true });
+  } catch (e) {
+    if (e.statusCode !== 404) throw e;
+  }
+}
+
+async function createAndStartSftp(users, port) {
+  const docker = getDocker();
+  if (!docker) throw new Error('Docker socket not available');
+  await removeSftpContainer(docker);
+  const enabled = users.filter((u) => u.enabled !== false);
+  if (enabled.length === 0) return;
+  const commandLines = enabled.map((u) => `${u.name}:${u.password || ''}:::data`);
+  const binds = enabled.map((u) => {
+    const m = (u.mount || '').trim();
+    const hostPath = m.startsWith('/') ? m : path.join(SFTP_HOST_MOUNT_ROOT, m).replace(/\\/g, '/');
+    return `${hostPath}:/home/${u.name}/data:rw`;
+  });
+  await docker.createContainer({
+    name: SFTP_CONTAINER_NAME,
+    Image: 'atmoz/sftp:latest',
+    Cmd: commandLines,
+    HostConfig: {
+      PortBindings: { '22/tcp': [{ HostPort: String(port) }] },
+      Binds: binds,
+      RestartPolicy: { Name: 'always' },
+    },
+  });
+  const c = docker.getContainer(SFTP_CONTAINER_NAME);
+  await c.start();
 }
 
 app.use(cors());
@@ -210,6 +309,110 @@ function netdataRowValues(labels, row) {
   };
 }
 
+function netdataLatestPair(res) {
+  const names = res?.dimension_names || res?.labels || [];
+  const latest = res?.latest_values;
+  if (Array.isArray(latest) && Array.isArray(names)) {
+    const skip = names[0] != null && /^time$/i.test(String(names[0]).trim()) ? 1 : 0;
+    return { labels: names.slice(skip), values: latest.slice(skip) };
+  }
+  if (Array.isArray(res?.data) && res.data.length) {
+    const last = res.data[res.data.length - 1];
+    return netdataRowValues(names, Array.isArray(last) ? last : []);
+  }
+  return { labels: [], values: [] };
+}
+
+function pickDimension(labels, values, regexes) {
+  for (let i = 0; i < labels.length; i++) {
+    const name = String(labels[i] ?? '');
+    if (regexes.some((r) => r.test(name))) {
+      const v = Number(values[i]);
+      if (Number.isFinite(v)) return v;
+    }
+  }
+  return 0;
+}
+
+async function getDiskSpacesFromNetdata() {
+  const chartsRes = await fetchNetdataJson('/api/v1/charts');
+  const chartsObj = chartsRes?.charts;
+  if (!chartsObj || typeof chartsObj !== 'object') return null;
+
+  const diskCharts = Object.entries(chartsObj)
+    .map(([id, info]) => ({ id, info }))
+    .filter(({ info }) => String(info?.context || '').toLowerCase() === 'disk.space');
+
+  if (!diskCharts.length) return null;
+
+  // 너무 많은 마운트를 한 번에 가져오지 않도록 제한
+  const targets = diskCharts.slice(0, 12);
+  const results = await Promise.all(
+    targets.map(async ({ id, info }) => {
+      const r = await fetchNetdataJson(`/api/v1/data?chart=${encodeURIComponent(id)}&points=1&format=json&options=jsonwrap`);
+      if (!r) return null;
+      const { labels, values } = netdataLatestPair(r);
+      if (!labels.length || !values.length) return null;
+
+      // Netdata disk.space의 대표 dimension: used, avail(available), free 등 (환경에 따라 다름)
+      const used = pickDimension(labels, values, [/^used$/i, /used/i]);
+      const avail = pickDimension(labels, values, [/^avail$/i, /avail/i, /^available$/i, /free/i]);
+      const total = used + avail;
+      const usedPercent = total > 0 ? (used / total) * 100 : null;
+
+      return {
+        chartId: id,
+        mount: info?.family || info?.title || id,
+        used,
+        avail,
+        total: total || null,
+        usedPercent,
+        units: r?.units || info?.units || null,
+      };
+    })
+  );
+
+  const disks = results.filter(Boolean);
+  return disks.length ? disks : null;
+}
+
+async function getDiskIOFromNetdata() {
+  const chartsRes = await fetchNetdataJson('/api/v1/charts');
+  const chartsObj = chartsRes?.charts;
+  if (!chartsObj || typeof chartsObj !== 'object') return null;
+
+  const ioCharts = Object.entries(chartsObj)
+    .map(([id, info]) => ({ id, info }))
+    .filter(({ info }) => String(info?.context || '').toLowerCase() === 'disk.io');
+
+  if (!ioCharts.length) return null;
+
+  const targets = ioCharts.slice(0, 12);
+  const results = await Promise.all(
+    targets.map(async ({ id, info }) => {
+      const r = await fetchNetdataJson(`/api/v1/data?chart=${encodeURIComponent(id)}&points=1&format=json&options=jsonwrap`);
+      if (!r) return null;
+      const { labels, values } = netdataLatestPair(r);
+      if (!labels.length || !values.length) return null;
+
+      // 대표 dimension: read, write (환경에 따라 reads/writes, read KiB/s 등)
+      const read = pickDimension(labels, values, [/^read$/i, /^reads$/i, /read/i]);
+      const write = pickDimension(labels, values, [/^write$/i, /^writes$/i, /write/i]);
+
+      return {
+        chartId: id,
+        device: info?.family || info?.title || id,
+        read,
+        write,
+        units: r?.units || info?.units || null,
+      };
+    })
+  );
+
+  const diskIO = results.filter(Boolean);
+  return diskIO.length ? diskIO : null;
+}
+
 /** Netdata에서 시스템 메트릭 가져오기. 실패 시 null. */
 async function getSystemFromNetdata() {
   // jsonwrap 사용 시 latest_values / dimension_names 제공되면 시간 열 없이 사용 가능
@@ -218,19 +421,7 @@ async function getSystemFromNetdata() {
     fetchNetdataJson('/api/v1/data?context=system.ram&points=1&format=json&options=jsonwrap'),
   ]);
 
-  const cpuNames = cpuRes?.dimension_names || cpuRes?.labels || [];
-  const cpuValues = cpuRes?.latest_values ?? (cpuRes?.data?.length ? cpuRes.data[cpuRes.data.length - 1] : null);
-  if (!Array.isArray(cpuValues)) return null;
-
-  const cpuPair = Array.isArray(cpuRes?.latest_values)
-    ? (() => {
-        const names = cpuNames || [];
-        const vals = cpuRes.latest_values;
-        const skip = names[0] != null && /^time$/i.test(String(names[0])) ? 1 : 0;
-        return { labels: names.slice(skip), values: vals.slice(skip) };
-      })()
-    : netdataRowValues(cpuNames, cpuValues);
-  const { labels: cpuLabels, values: cpuV } = cpuPair;
+  const { labels: cpuLabels, values: cpuV } = netdataLatestPair(cpuRes);
   let totalCpu = 0;
   let idle = 0;
   cpuLabels.forEach((label, i) => {
@@ -243,19 +434,7 @@ async function getSystemFromNetdata() {
   let cpuPercent = totalCpu > 0 ? Math.max(0, Math.min(100, 100 - (idle / totalCpu) * 100)) : null;
   if (cpuPercent != null && (cpuPercent >= 99.5 || cpuPercent <= 0.5)) cpuPercent = null;
 
-  const ramNames = ramRes?.dimension_names || ramRes?.labels || [];
-  const ramValues = ramRes?.latest_values ?? (ramRes?.data?.length ? ramRes.data[ramRes.data.length - 1] : null);
-  if (!Array.isArray(ramValues)) return null;
-
-  const ramPair = Array.isArray(ramRes?.latest_values)
-    ? (() => {
-        const names = ramNames || [];
-        const vals = ramRes.latest_values;
-        const skip = names[0] != null && /^time$/i.test(String(names[0])) ? 1 : 0;
-        return { labels: names.slice(skip), values: vals.slice(skip) };
-      })()
-    : netdataRowValues(ramNames, ramValues);
-  const { labels: ramLabels, values: ramV } = ramPair;
+  const { labels: ramLabels, values: ramV } = netdataLatestPair(ramRes);
   let usedBytes = 0;
   let freeBytes = 0;
   let cachedBytes = 0;
@@ -275,10 +454,15 @@ async function getSystemFromNetdata() {
   if (totalBytes === 0 || usedBytes === 0) return null;
   if (cpuPercent == null) return null;
 
+  const disks = await getDiskSpacesFromNetdata().catch(() => null);
+  const diskIO = await getDiskIOFromNetdata().catch(() => null);
+
   return {
     cpu: { percent: cpuPercent },
     memory: { totalBytes, usedBytes },
     storage: null,
+    disks,
+    diskIO,
     source: 'netdata',
   };
 }
@@ -295,6 +479,59 @@ async function getNetworkStatsFromNetdata() {
     if (Number.isFinite(v) && label) byInterface[label] = v;
   });
   return Object.keys(byInterface).length ? { byInterface, source: 'netdata' } : null;
+}
+
+/** Linux: /proc/net/tcp, tcp6에서 LISTEN 상태 포트 번호 목록 반환 (중복 제거, 정렬) */
+function getListeningPorts() {
+  if (process.platform !== 'linux') return [];
+  const ports = new Set();
+  try {
+    for (const name of ['/proc/net/tcp', '/proc/net/tcp6']) {
+      try {
+        const raw = readFileSync(name, 'utf8');
+        const lines = raw.split('\n').slice(1);
+        for (const line of lines) {
+          const cols = line.trim().split(/\s+/);
+          if (cols.length < 4) continue;
+          const st = cols[3];
+          if (st !== '0A') continue; // 0A = LISTEN
+          const local = cols[1];
+          const portHex = local.split(':')[1];
+          if (!portHex) continue;
+          const port = parseInt(portHex, 16);
+          if (Number.isFinite(port) && port > 0 && port < 65536) ports.add(port);
+        }
+      } catch (_) {
+        // ignore missing or unreadable
+      }
+    }
+    return [...ports].sort((a, b) => a - b);
+  } catch (e) {
+    return [];
+  }
+}
+
+/** Linux: lsblk로 물리 디스크 정보 (모델, 용량, 타입) 반환. 실패 시 빈 배열 */
+function getDiskHardwareInfo() {
+  if (process.platform !== 'linux') return [];
+  try {
+    const out = execSync('lsblk -J -o NAME,MODEL,SIZE,TYPE,TRAN', { encoding: 'utf8', timeout: 5000 });
+    const data = JSON.parse(out);
+    const blockdevices = data?.blockdevices;
+    if (!Array.isArray(blockdevices)) return [];
+    return blockdevices
+      .filter((d) => d?.type === 'disk')
+      .map((d) => ({
+        name: d.name || '',
+        model: (d.model || '').trim() || null,
+        size: d.size || null,
+        type: d.type || 'disk',
+        transport: d.tran || null,
+      }))
+      .filter((d) => d.name);
+  } catch (e) {
+    return [];
+  }
 }
 
 // ---------- 시스템 정보 ----------
@@ -315,6 +552,12 @@ app.get('/api/system', async (req, res) => {
       };
     }
 
+    // 시스템 메트릭이 OS 폴백이어도, 디스크 정보는 Netdata에서 별도로 시도
+    let disks = payload.disks ?? null;
+    let diskIO = payload.diskIO ?? null;
+    if (disks == null) disks = await getDiskSpacesFromNetdata().catch(() => null);
+    if (diskIO == null) diskIO = await getDiskIOFromNetdata().catch(() => null);
+
     let storage = payload.storage;
     if (storage == null) {
       try {
@@ -330,10 +573,24 @@ app.get('/api/system', async (req, res) => {
       }
     }
 
+    const uptimeSeconds = typeof os.uptime === 'function' ? os.uptime() : undefined;
+    const loadAvg = typeof os.loadavg === 'function' ? os.loadavg() : undefined;
+    const cpus = typeof os.cpus === 'function' ? os.cpus() : [];
+    const cpuInfo = {
+      ...payload.cpu,
+      ...(cpus.length > 0 && {
+        model: cpus[0]?.model ?? null,
+        cores: cpus.length,
+      }),
+    };
     res.json({
       storage,
       memory: payload.memory,
-      cpu: payload.cpu,
+      cpu: cpuInfo,
+      ...(uptimeSeconds != null && Number.isFinite(uptimeSeconds) && { uptimeSeconds }),
+      ...(Array.isArray(loadAvg) && loadAvg.length > 0 && { loadAverage: loadAvg }),
+      ...(disks != null && { disks }),
+      ...(diskIO != null && { diskIO }),
       ...(payload.source && { source: payload.source }),
     });
   } catch (err) {
@@ -342,37 +599,233 @@ app.get('/api/system', async (req, res) => {
   }
 });
 
-// ---------- RAID 정보 (/proc/mdstat 기반, Linux 전용) ----------
+app.get('/api/logs', (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 200, 500);
+    const slice = logBuffer.slice(-limit);
+    res.json({ logs: slice });
+  } catch (err) {
+    res.status(500).json({ error: err.message, logs: [] });
+  }
+});
+
+app.get('/api/ports', async (req, res) => {
+  try {
+    const [container, docker, truenas] = await Promise.all([
+      Promise.resolve(getListeningPorts()),
+      getDockerPorts(),
+      getTrueNASPorts(),
+    ]);
+    res.json({ container, docker, truenas });
+  } catch (err) {
+    res.status(500).json({ error: err.message, container: [], docker: [], truenas: [] });
+  }
+});
+
+app.get('/api/disks/info', (req, res) => {
+  try {
+    const disks = getDiskHardwareInfo();
+    res.json({ ok: true, disks });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, disks: [] });
+  }
+});
+
+const TRUENAS_HEADERS = (url, key) =>
+  url && key
+    ? { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }
+    : null;
+
+/** 풀 topology에서 RAID 타입·디스크 목록 추출 */
+function parsePoolTopology(topology) {
+  if (!topology || !Array.isArray(topology.data)) return [];
+  return topology.data.map((vdev) => ({
+    type: vdev.type ?? 'STRIPE',
+    disks: Array.isArray(vdev.disks) ? vdev.disks : [],
+  }));
+}
+
+/** TrueNAS REST API로 스토리지 풀 목록·상세(토폴로지) 조회 */
+async function getTrueNASPoolStatus() {
+  if (!TRUENAS_URL || !TRUENAS_API_KEY) return [];
+  const url = `${TRUENAS_URL}/api/v2.0/pool`;
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: TRUENAS_HEADERS(TRUENAS_URL, TRUENAS_API_KEY),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (!Array.isArray(data)) return [];
+    const pools = data.map((p) => ({
+      name: p.name ?? String(p.id ?? ''),
+      status: p.status ?? null,
+      healthy: Boolean(p.healthy),
+      id: p.id,
+      topology: parsePoolTopology(p.topology),
+    }));
+    // 목록에 topology가 없으면 풀별 상세 조회
+    const withTopology = await Promise.all(
+      pools.map(async (p) => {
+        if ((p.topology?.length ?? 0) > 0) return p;
+        try {
+          const r = await fetch(`${TRUENAS_URL}/api/v2.0/pool/${p.id}`, {
+            method: 'GET',
+            headers: TRUENAS_HEADERS(TRUENAS_URL, TRUENAS_API_KEY),
+            signal: AbortSignal.timeout(5000),
+          });
+          if (!r.ok) return p;
+          const detail = await r.json();
+          const one = Array.isArray(detail) ? detail[0] : detail;
+          if (one?.topology) p.topology = parsePoolTopology(one.topology);
+        } catch {
+          // ignore
+        }
+        return p;
+      })
+    );
+    return withTopology;
+  } catch (e) {
+    return [];
+  }
+}
+
+/** TrueNAS REST API로 디스크 목록 조회 (이름, 용량, 모델 등) */
+async function getTrueNASDisks() {
+  if (!TRUENAS_URL || !TRUENAS_API_KEY) return [];
+  const url = `${TRUENAS_URL}/api/v2.0/disk`;
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: TRUENAS_HEADERS(TRUENAS_URL, TRUENAS_API_KEY),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (!Array.isArray(data)) return [];
+    return data.map((d) => ({
+      name: d.name ?? d.devname ?? d.identifier ?? '',
+      devname: d.devname ?? d.name ?? '',
+      size: d.size ?? null,
+      model: d.model ?? null,
+      serial: d.serial ?? null,
+      pool: d.pool ?? null,
+      type: d.type ?? null,
+    })).filter((d) => d.name);
+  } catch (e) {
+    return [];
+  }
+}
+
+/** TrueNAS 시스템에서 사용 중인 포트 (서비스별). SSH, 앱 사용 포트 등 */
+async function getTrueNASPorts() {
+  if (!TRUENAS_URL || !TRUENAS_API_KEY) return [];
+  const entries = [];
+  const opts = { method: 'GET', headers: TRUENAS_HEADERS(TRUENAS_URL, TRUENAS_API_KEY), signal: AbortSignal.timeout(8000) };
+
+  try {
+    const sshRes = await fetch(`${TRUENAS_URL}/api/v2.0/ssh`, opts);
+    if (sshRes.ok) {
+      const sshData = await sshRes.json();
+      const cfg = Array.isArray(sshData) ? sshData[0] : sshData;
+      const port = cfg?.tcpport ?? cfg?.port;
+      if (Number.isFinite(port) && port > 0 && port < 65536) {
+        entries.push({ source: 'TrueNAS', service: 'SSH', port });
+      }
+    }
+  } catch (_) {}
+
+  try {
+    const appRes = await fetch(`${TRUENAS_URL}/api/v2.0/app/used_ports`, opts);
+    if (appRes.ok) {
+      const appData = await appRes.json();
+      if (typeof appData === 'object' && appData !== null && !Array.isArray(appData)) {
+        for (const [portStr, name] of Object.entries(appData)) {
+          const port = parseInt(portStr, 10);
+          if (Number.isFinite(port) && port > 0 && port < 65536) {
+            entries.push({ source: 'TrueNAS', service: name ? String(name) : 'App', port });
+          }
+        }
+      } else if (Array.isArray(appData)) {
+        for (const item of appData) {
+          const port = item?.port ?? item?.port_number;
+          const name = item?.name ?? item?.service;
+          if (Number.isFinite(port) && port > 0 && port < 65536) {
+            entries.push({ source: 'TrueNAS', service: name ? String(name) : 'App', port });
+          }
+        }
+      }
+    }
+  } catch (_) {}
+
+  return entries;
+}
+
+/** Docker 소켓으로 호스트의 모든 컨테이너 포트 매핑 수집 (docker ps의 PORTS에 해당) */
+async function getDockerPorts() {
+  const docker = getDocker();
+  if (!docker) return [];
+  try {
+    const containers = await docker.listContainers();
+    const seen = new Set();
+    const entries = [];
+    for (const c of containers) {
+      const name = (c.Names && c.Names[0]) ? c.Names[0].replace(/^\//, '') : c.Id?.slice(0, 12) || 'unknown';
+      const ports = c.Ports || [];
+      for (const p of ports) {
+        const port = p.PublicPort ?? p.publicPort;
+        if (Number.isFinite(port) && port > 0 && port < 65536) {
+          const key = `${name}:${port}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          entries.push({ source: 'Docker', service: name, port });
+        }
+      }
+    }
+    entries.sort((a, b) => a.port - b.port || (a.service || '').localeCompare(b.service || ''));
+    return entries;
+  } catch (e) {
+    return [];
+  }
+}
+
+// ---------- RAID 정보 (mdadm + TrueNAS 풀·디스크) ----------
 app.get('/api/raid', async (req, res) => {
   try {
-    let text;
+    const [truenasPools, truenasDisks] = await Promise.all([
+      getTrueNASPoolStatus(),
+      getTrueNASDisks(),
+    ]);
+
+    let arrays = [];
     try {
-      text = await fs.readFile('/proc/mdstat', 'utf8');
+      const text = await fs.readFile('/proc/mdstat', 'utf8');
+      const lines = text.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line || line.startsWith('Personalities') || line.startsWith('unused devices')) continue;
+        const match = line.match(/^(md\S*) : .* (raid[0-9+]+)/);
+        if (!match) continue;
+        const name = match[1];
+        const level = match[2];
+        const detailLine = (lines[i + 1] || '').trim();
+        arrays.push({
+          name,
+          level,
+          summary: line,
+          detail: detailLine,
+        });
+      }
     } catch {
-      // 컨테이너/호스트에 mdadm 기반 소프트웨어 RAID가 없을 수 있음
-      return res.json({ arrays: [] });
+      // 컨테이너/호스트에 mdadm이 없을 수 있음 (예: TrueNAS만 사용)
     }
 
-    const lines = text.split('\n');
-    const arrays = [];
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!line || line.startsWith('Personalities') || line.startsWith('unused devices')) continue;
-      // 예: md0 : active raid1 sda1[0] sdb1[1]
-      const match = line.match(/^(md\S*) : .* (raid[0-9+]+)/);
-      if (!match) continue;
-      const name = match[1];
-      const level = match[2];
-      const detailLine = (lines[i + 1] || '').trim();
-      arrays.push({
-        name,
-        level,
-        summary: line,
-        detail: detailLine,
-      });
-    }
-
-    res.json({ arrays });
+    res.json({
+      arrays,
+      truenas_pools: truenasPools,
+      truenas_disks: truenasDisks,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -457,6 +910,172 @@ app.post('/api/ai/chat', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message || 'AI request failed' });
+  }
+});
+
+// ---------- SFTP API ----------
+app.get('/api/sftp/config', async (req, res) => {
+  try {
+    const state = await readSftpStore();
+    const port = Number(state.meta.port) || 1014;
+    res.json({
+      ok: true,
+      port,
+      users: state.users,
+      pending: state.pending,
+      delete_pending: state.delete_pending || [],
+      meta: state.meta,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/sftp/config/port', async (req, res) => {
+  try {
+    const port = Number(req.body?.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      return res.status(400).json({ error: 'Invalid port (1-65535)' });
+    }
+    const state = await readSftpStore();
+    state.meta = state.meta || {};
+    state.meta.port = port;
+    await writeSftpStore(state);
+    res.json({ ok: true, port });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/sftp/pending/add', async (req, res) => {
+  try {
+    const { name, password, mount } = req.body || {};
+    const n = String(name || '').trim();
+    if (!n || !USERNAME_RE.test(n)) return res.status(400).json({ error: 'Invalid username' });
+    const m = String(mount || '').trim();
+    if (!m) return res.status(400).json({ error: 'Mount path required' });
+    const state = await readSftpStore();
+    const existing = [...state.users, ...state.pending].find((u) => u.name === n);
+    if (existing) return res.status(400).json({ error: 'User already exists' });
+    state.pending.push({
+      name: n,
+      password: String(password || '').trim(),
+      mount: m,
+      enabled: true,
+    });
+    await writeSftpStore(state);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/sftp/pending/delete', express.json(), async (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'name required' });
+    const state = await readSftpStore();
+    state.pending = state.pending.filter((u) => u.name !== name);
+    await writeSftpStore(state);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/sftp/pending/toggle', express.json(), async (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    const state = await readSftpStore();
+    const u = state.pending.find((x) => x.name === name);
+    if (!u) return res.status(404).json({ error: 'Pending user not found' });
+    u.enabled = !u.enabled;
+    await writeSftpStore(state);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/sftp/users/toggle', async (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    const state = await readSftpStore();
+    const u = state.users.find((x) => x.name === name);
+    if (!u) return res.status(404).json({ error: 'User not found' });
+    u.enabled = !u.enabled;
+    await writeSftpStore(state);
+    const enabled = state.users.filter((x) => x.enabled);
+    await createAndStartSftp(enabled, Number(state.meta?.port) || 1014);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/sftp/users/mark-delete', express.json(), async (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    const state = await readSftpStore();
+    if (!state.users.some((x) => x.name === name)) return res.status(404).json({ error: 'User not found' });
+    state.delete_pending = state.delete_pending || [];
+    if (!state.delete_pending.includes(name)) state.delete_pending.push(name);
+    await writeSftpStore(state);
+    res.json({ ok: true, delete_pending: state.delete_pending });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/sftp/users/unmark-delete', express.json(), async (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    const state = await readSftpStore();
+    state.delete_pending = (state.delete_pending || []).filter((x) => x !== name);
+    await writeSftpStore(state);
+    res.json({ ok: true, delete_pending: state.delete_pending });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/sftp/apply', async (req, res) => {
+  try {
+    const state = await readSftpStore();
+    if (state.pending.length) {
+      state.users = [...state.users, ...state.pending];
+      state.pending = [];
+    }
+    const enabled = state.users.filter((u) => u.enabled);
+    await writeSftpStore(state);
+    await createAndStartSftp(enabled, Number(state.meta?.port) || 1014);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/sftp/restart', async (req, res) => {
+  try {
+    const state = await readSftpStore();
+    state.users = state.users.filter((u) => !(state.delete_pending || []).includes(u.name));
+    state.delete_pending = [];
+    await writeSftpStore(state);
+    const enabled = state.users.filter((u) => u.enabled);
+    await createAndStartSftp(enabled, Number(state.meta?.port) || 1014);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
 });
 
