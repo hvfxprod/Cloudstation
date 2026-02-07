@@ -47,7 +47,7 @@ const ControlPanel: React.FC = () => {
   const [cpuModel, setCpuModel] = useState<string | null>(null);
   const [cpuCores, setCpuCores] = useState<number | null>(null);
   const [listeningPorts, setListeningPorts] = useState<number[]>([]);
-  const [dockerPorts, setDockerPorts] = useState<{ source: string; service: string; port: number }[]>([]);
+  const [dockerPorts, setDockerPorts] = useState<{ source: string; service: string; port: number; containerPort?: number | null }[]>([]);
   const [truenasPorts, setTruenasPorts] = useState<{ source: string; service: string; port: number }[]>([]);
   const [listeningPortsLoading, setListeningPortsLoading] = useState(false);
   const [systemSource, setSystemSource] = useState<string | null>(null);
@@ -912,6 +912,7 @@ const ControlPanel: React.FC = () => {
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
               <div className="px-6 py-3 border-b border-slate-200 bg-slate-50">
                 <h2 className="text-sm font-semibold text-slate-700">이 컨테이너 (CloudStation) — LISTEN</h2>
+                <p className="text-xs text-slate-500 mt-0.5">이 컨테이너 내부에서 리스닝 중인 포트 (호스트와 1:1 매핑이면 동일 번호)</p>
               </div>
               {listeningPortsLoading && listeningPorts.length === 0 && dockerPorts.length === 0 && truenasPorts.length === 0 ? (
                 <div className="p-8 text-center text-slate-500">불러오는 중...</div>
@@ -943,14 +944,15 @@ const ControlPanel: React.FC = () => {
               <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
                 <div className="px-6 py-3 border-b border-slate-200 bg-slate-50">
                   <h2 className="text-sm font-semibold text-slate-700">Docker (호스트 포트 매핑)</h2>
-                  <p className="text-xs text-slate-500 mt-0.5">docker ps 기준 · 이 호스트에서 바인딩된 모든 컨테이너 포트</p>
+                  <p className="text-xs text-slate-500 mt-0.5">접속 시 사용하는 건 호스트 포트입니다. 컨테이너 내부 포트는 참고용.</p>
                 </div>
                 <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
                   <table className="w-full text-left">
                     <thead className="bg-slate-50/70 border-b border-slate-200 sticky top-0">
                       <tr>
                         <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">컨테이너</th>
-                        <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Port</th>
+                        <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">호스트 포트</th>
+                        <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">컨테이너(내부)</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -958,6 +960,7 @@ const ControlPanel: React.FC = () => {
                         <tr key={`d-${row.service}-${row.port}-${i}`} className="hover:bg-slate-50/50">
                           <td className="px-6 py-2 text-sm text-slate-700 font-medium">{row.service}</td>
                           <td className="px-6 py-2 font-mono text-slate-800 font-semibold">{row.port}</td>
+                          <td className="px-6 py-2 font-mono text-slate-600">{row.containerPort != null ? row.containerPort : '—'}</td>
                         </tr>
                       ))}
                     </tbody>

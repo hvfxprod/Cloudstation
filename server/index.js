@@ -774,12 +774,18 @@ async function getDockerPorts() {
       const name = (c.Names && c.Names[0]) ? c.Names[0].replace(/^\//, '') : c.Id?.slice(0, 12) || 'unknown';
       const ports = c.Ports || [];
       for (const p of ports) {
-        const port = p.PublicPort ?? p.publicPort;
-        if (Number.isFinite(port) && port > 0 && port < 65536) {
-          const key = `${name}:${port}`;
+        const hostPort = p.PublicPort ?? p.publicPort;
+        const containerPort = p.PrivatePort ?? p.privatePort;
+        if (Number.isFinite(hostPort) && hostPort > 0 && hostPort < 65536) {
+          const key = `${name}:${hostPort}:${containerPort}`;
           if (seen.has(key)) continue;
           seen.add(key);
-          entries.push({ source: 'Docker', service: name, port });
+          entries.push({
+            source: 'Docker',
+            service: name,
+            port: hostPort,
+            containerPort: Number.isFinite(containerPort) && containerPort > 0 ? containerPort : null,
+          });
         }
       }
     }
