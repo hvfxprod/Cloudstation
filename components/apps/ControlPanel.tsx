@@ -1,17 +1,156 @@
 
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { 
-  Activity, Database, Users, Shield, Globe, Cpu, RefreshCw, UserPlus, ShieldAlert, Key, Globe2, Monitor, Wifi, Palette, Bot, HardDrive, Server, Clock, Layers, FileText
+  Activity, Database, Users, Shield, Globe, Cpu, RefreshCw, UserPlus, ShieldAlert, Key, Globe2, Monitor, Wifi, Palette, Bot, HardDrive, Server, Clock, Layers, FileText, X, Lock, Settings
 } from 'lucide-react';
 import { useOSStore, type ThemeMode } from '../../store';
+import LoginSettingsModal from '../LoginSettingsModal';
 import { getGeminiKeySet, saveGeminiKey } from '../../lib/ai';
 import { BACKGROUND_PRESETS } from '../../lib/customization';
+import { t, type Lang } from '../../lib/i18n';
 import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip } from 'recharts';
 
-type TabID = 'health' | 'users' | 'security' | 'display' | 'network' | 'update' | 'ai-assistant' | 'sftp' | 'system-log' | 'ports';
+type TabID = 'general' | 'health' | 'users' | 'security' | 'display' | 'network' | 'update' | 'ai-assistant' | 'sftp' | 'system-log' | 'ports';
+
+function FirewallModal({
+  enabled,
+  rules,
+  onClose,
+  onSave,
+}: {
+  enabled: boolean;
+  rules: { type: string; value: string }[];
+  onClose: () => void;
+  onSave: (enabled: boolean, rules: { type: string; value: string }[]) => Promise<void>;
+}) {
+  const [enabledVal, setEnabledVal] = useState(enabled);
+  const [rulesVal, setRulesVal] = useState<{ type: string; value: string }[]>(rules);
+  const [newValue, setNewValue] = useState('');
+  const [newType, setNewType] = useState<'allow' | 'block'>('block');
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    setEnabledVal(Boolean(enabled));
+    setRulesVal(Array.isArray(rules) ? rules : []);
+  }, [enabled, rules]);
+  const addRule = () => {
+    const v = newValue.trim();
+    if (!v) return;
+    setRulesVal((prev) => [...prev, { type: newType, value: v }]);
+    setNewValue('');
+  };
+  const removeRule = (i: number) => setRulesVal((prev) => prev.filter((_, idx) => idx !== i));
+  const handleSave = async () => {
+    setSaving(true);
+    await onSave(enabledVal, rulesVal);
+    setSaving(false);
+  };
+  const modal = (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+      style={{ top: 0, left: 0, right: 0, bottom: 0, minWidth: '100vw', minHeight: '100dvh' }}
+      onClick={onClose}
+      role="presentation"
+    >
+      <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full max-h-[90vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between p-6 border-b border-slate-200">
+          <h2 className="text-lg font-bold text-slate-800">Firewall Rules</h2>
+          <button type="button" onClick={onClose} className="p-1 rounded hover:bg-slate-100"><X size={20} /></button>
+        </div>
+        <div className="p-6 overflow-y-auto space-y-4">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" checked={enabledVal} onChange={(e) => setEnabledVal(e.target.checked)} className="rounded" />
+            <span className="text-sm font-medium text-slate-700">Firewall enabled</span>
+          </label>
+          <p className="text-xs text-slate-500">Add IP or CIDR (e.g. 192.168.1.0/24). Block rules deny access; if any allow rules exist, only those IPs are allowed.</p>
+          <div className="flex gap-2">
+            <input
+              value={newValue}
+              onChange={(e) => setNewValue(e.target.value)}
+              placeholder="IP or CIDR"
+              className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm"
+            />
+            <select value={newType} onChange={(e) => setNewType(e.target.value as 'allow' | 'block')} className="px-3 py-2 border border-slate-200 rounded-lg text-sm">
+              <option value="allow">Allow</option>
+              <option value="block">Block</option>
+            </select>
+            <button type="button" onClick={addRule} className="px-4 py-2 bg-slate-100 rounded-lg text-sm font-medium hover:bg-slate-200">Add</button>
+          </div>
+          <ul className="space-y-2">
+            {(Array.isArray(rulesVal) ? rulesVal : []).map((r, i) => (
+              <li key={i} className="flex items-center justify-between py-2 px-3 bg-slate-50 rounded-lg text-sm">
+                <span className="font-mono">{r.value}</span>
+                <span className={`text-xs font-medium ${r.type === 'allow' ? 'text-green-600' : 'text-red-600'}`}>{r.type}</span>
+                <button type="button" onClick={() => removeRule(i)} className="text-red-600 hover:underline text-xs">Remove</button>
+              </li>
+            ))}
+          </ul>
+        </div>
+        <div className="p-6 border-t border-slate-200 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="px-4 py-2 rounded-lg border border-slate-200 text-sm font-medium">Cancel</button>
+          <button type="button" onClick={handleSave} disabled={saving} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50">Save</button>
+        </div>
+      </div>
+    </div>
+  );
+  return createPortal(modal, document.body);
+}
+
+function TwoFaModal({
+  enabled,
+  verified,
+  qrDataUrl,
+  secret,
+  onClose,
+  onEnable,
+  onDisable,
+}: {
+  enabled: boolean;
+  verified: boolean;
+  qrDataUrl: string | null;
+  secret: string;
+  onClose: () => void;
+  onEnable: () => Promise<void>;
+  onDisable: () => Promise<void>;
+}) {
+  const modal = (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+      style={{ top: 0, left: 0, right: 0, bottom: 0, minWidth: '100vw', minHeight: '100dvh' }}
+      onClick={onClose}
+      role="presentation"
+    >
+      <div className="bg-white rounded-2xl shadow-xl max-w-md w-full overflow-hidden" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between p-6 border-b border-slate-200">
+          <h2 className="text-lg font-bold text-slate-800">2-Step Verification</h2>
+          <button type="button" onClick={onClose} className="p-1 rounded hover:bg-slate-100"><X size={20} /></button>
+        </div>
+        <div className="p-6 space-y-4">
+          {enabled ? (
+            <>
+              {qrDataUrl && (
+                <div className="flex flex-col items-center gap-2">
+                  <p className="text-sm text-slate-600">Scan with your authenticator app (Google Authenticator, etc.)</p>
+                  <img src={qrDataUrl} alt="QR Code" className="w-48 h-48" />
+                  {secret && <p className="text-xs font-mono text-slate-500 break-all">Or enter manually: {secret}</p>}
+                </div>
+              )}
+              {verified && <p className="text-sm text-green-600 font-medium">You are verified for this session.</p>}
+              <button type="button" onClick={onDisable} className="w-full py-2 rounded-lg border border-red-200 text-red-600 text-sm font-medium hover:bg-red-50">Disable 2-Step Verification</button>
+            </>
+          ) : (
+            <button type="button" onClick={onEnable} className="w-full py-3 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">Enable 2-Step Verification</button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+  return createPortal(modal, document.body);
+}
 
 const ControlPanel: React.FC = () => {
-  const { addNotification, theme, background, backgroundCustomUrl, setTheme, setBackground, setBackgroundCustomUrl } = useOSStore();
+  const { addNotification, theme, background, backgroundCustomUrl, setTheme, setBackground, setBackgroundCustomUrl, setTimezone, setLanguage } = useOSStore();
+  const language = useOSStore((s) => s.language) as Lang;
   const [activeTab, setActiveTab] = useState<TabID>('health');
   const [aiApiKeyInput, setAiApiKeyInput] = useState('');
   const [geminiKeySet, setGeminiKeySet] = useState<boolean | null>(null);
@@ -46,7 +185,7 @@ const ControlPanel: React.FC = () => {
   }[]>([]);
   const [cpuModel, setCpuModel] = useState<string | null>(null);
   const [cpuCores, setCpuCores] = useState<number | null>(null);
-  const [listeningPorts, setListeningPorts] = useState<number[]>([]);
+  const [listeningPorts, setListeningPorts] = useState<{ port: number; name: string }[]>([]);
   const [dockerPorts, setDockerPorts] = useState<{ source: string; service: string; port: number; containerPort?: number | null }[]>([]);
   const [truenasPorts, setTruenasPorts] = useState<{ source: string; service: string; port: number }[]>([]);
   const [listeningPortsLoading, setListeningPortsLoading] = useState(false);
@@ -64,12 +203,34 @@ const ControlPanel: React.FC = () => {
     hostname: string;
     interfaces: { name: string; address: string; family: string; mac?: string | null }[];
     dns: string[];
+    source?: string;
     networkStats?: { byInterface: Record<string, number>; source: string };
   } | null>(null);
   const [networkLoading, setNetworkLoading] = useState(false);
   const [systemLogs, setSystemLogs] = useState<{ time: string; level: string; text: string }[]>([]);
   const [systemLogLoading, setSystemLogLoading] = useState(false);
-
+  const [firewallEnabled, setFirewallEnabled] = useState(false);
+  const [firewallRules, setFirewallRules] = useState<{ type: string; value: string }[]>([]);
+  const [firewallLoading, setFirewallLoading] = useState(false);
+  const [firewallModalOpen, setFirewallModalOpen] = useState(false);
+  const [twoFaEnabled, setTwoFaEnabled] = useState(false);
+  const [twoFaVerified, setTwoFaVerified] = useState(false);
+  const [twoFaModalOpen, setTwoFaModalOpen] = useState(false);
+  const [show2FAGate, setShow2FAGate] = useState(false);
+  const [twoFaCode, setTwoFaCode] = useState('');
+  const [twoFaVerifyError, setTwoFaVerifyError] = useState('');
+  const [twoFaSetupQr, setTwoFaSetupQr] = useState<string | null>(null);
+  const [twoFaSetupSecret, setTwoFaSetupSecret] = useState('');
+  const [showLoginSettingsModal, setShowLoginSettingsModal] = useState(false);
+  const [generalLoading, setGeneralLoading] = useState(false);
+  const [generalSaving, setGeneralSaving] = useState(false);
+  const [generalLanguage, setGeneralLanguage] = useState('en');
+  const [generalTimezone, setGeneralTimezone] = useState('UTC');
+  const [generalTruenasUrl, setGeneralTruenasUrl] = useState('');
+  const [generalTruenasApiKey, setGeneralTruenasApiKey] = useState('');
+  const [generalTruenasApiKeySet, setGeneralTruenasApiKeySet] = useState(false);
+  const [generalMountPath, setGeneralMountPath] = useState('');
+  const [generalAiKey, setGeneralAiKey] = useState('');
   useEffect(() => {
     const fetchSystem = async () => {
       try {
@@ -132,6 +293,27 @@ const ControlPanel: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    if (activeTab === 'general') {
+      setGeneralLoading(true);
+      Promise.all([
+        fetch('/api/settings/general', { credentials: 'include' }).then((r) => (r.ok ? r.json() : null)),
+        getGeminiKeySet(),
+      ])
+        .then(([data, aiSet]) => {
+          if (data) {
+            setGeneralLanguage(data.language ?? 'en');
+            setGeneralTimezone(data.timezone ?? 'UTC');
+            setGeneralTruenasUrl(data.truenasUrl ?? '');
+            setGeneralTruenasApiKeySet(!!data.truenasApiKeySet);
+            setGeneralMountPath(data.mountPath ?? '');
+          }
+          setGeminiKeySet(!!aiSet);
+        })
+        .catch(() => {})
+        .finally(() => setGeneralLoading(false));
+    }
+  }, [activeTab]);
+  useEffect(() => {
     if (activeTab === 'ai-assistant') {
       getGeminiKeySet().then(setGeminiKeySet);
     }
@@ -183,6 +365,47 @@ const ControlPanel: React.FC = () => {
   }, [activeTab]);
 
   useEffect(() => {
+    const check = async () => {
+      try {
+        const res = await fetch('/api/security/2fa/status', { credentials: 'include' });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok) return;
+        if (d.enabled === true && d.verified !== true) setShow2FAGate(true);
+      } catch (_) {}
+    };
+    check();
+  }, []);
+
+  useEffect(() => {
+    if (activeTab !== 'security') return;
+    let cancelled = false;
+    setFirewallLoading(true);
+    Promise.all([
+      fetch('/api/security/firewall', { credentials: 'include' }),
+      fetch('/api/security/2fa/status', { credentials: 'include' }),
+    ])
+      .then(async ([fwRes, faRes]) => {
+        const fw = await fwRes.json().catch(() => ({}));
+        const fa = await faRes.json().catch(() => ({}));
+        return { fw, fa };
+      })
+      .then(({ fw, fa }) => {
+        if (cancelled) return;
+        setFirewallEnabled(Boolean(fw?.enabled));
+        setFirewallRules(Array.isArray(fw?.rules) ? fw.rules : []);
+        setTwoFaEnabled(Boolean(fa?.enabled));
+        setTwoFaVerified(Boolean(fa?.verified));
+      })
+      .catch(() => {
+        if (!cancelled) setFirewallRules([]);
+      })
+      .finally(() => {
+        if (!cancelled) setFirewallLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [activeTab]);
+
+  useEffect(() => {
     if (activeTab !== 'ports') return;
     const fetchPorts = async () => {
       setListeningPortsLoading(true);
@@ -190,7 +413,8 @@ const ControlPanel: React.FC = () => {
         const res = await fetch('/api/ports');
         if (!res.ok) return;
         const data = await res.json();
-        setListeningPorts(Array.isArray(data.container) ? data.container : Array.isArray(data.ports) ? data.ports : []);
+        const raw = Array.isArray(data.container) ? data.container : Array.isArray(data.ports) ? data.ports : [];
+        setListeningPorts(raw.map((p) => (typeof p === 'object' && p != null && 'port' in p) ? { port: p.port, name: p.name ?? 'Internal' } : { port: Number(p), name: 'Internal' }));
         setDockerPorts(Array.isArray(data.docker) ? data.docker : []);
         setTruenasPorts(Array.isArray(data.truenas) ? data.truenas : []);
       } catch {
@@ -208,6 +432,124 @@ const ControlPanel: React.FC = () => {
 
   const renderContent = () => {
     switch (activeTab) {
+      case 'general': {
+        const timezones = ['UTC', 'America/New_York', 'America/Los_Angeles', 'America/Chicago', 'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Asia/Seoul', 'Asia/Shanghai', 'Australia/Sydney'];
+        return (
+          <div className="space-y-6">
+            <h1 className="text-2xl font-bold text-slate-800">{t('general', language)}</h1>
+            {generalLoading ? (
+              <p className="text-slate-500 text-sm">{t('loading', language)}</p>
+            ) : (
+              <div className="space-y-6 w-full">
+                <div className="bg-white p-6 rounded-2xl border border-slate-200">
+                  <h3 className="font-bold text-slate-800 mb-3">{t('language', language)}</h3>
+                  <select
+                    value={generalLanguage}
+                    onChange={(e) => setGeneralLanguage(e.target.value)}
+                    className="w-full px-4 py-2 border border-slate-200 rounded-lg text-sm"
+                  >
+                    <option value="en">{t('english', language)}</option>
+                    <option value="ko">{t('korean', language)}</option>
+                  </select>
+                </div>
+                <div className="bg-white p-6 rounded-2xl border border-slate-200">
+                  <h3 className="font-bold text-slate-800 mb-3">{t('timezone', language)}</h3>
+                  <select
+                    value={generalTimezone}
+                    onChange={(e) => setGeneralTimezone(e.target.value)}
+                    className="w-full px-4 py-2 border border-slate-200 rounded-lg text-sm"
+                  >
+                    {timezones.map((tz) => (
+                      <option key={tz} value={tz}>{tz}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="bg-white p-6 rounded-2xl border border-slate-200">
+                  <h3 className="font-bold text-slate-800 mb-3">{t('truenasApi', language)}</h3>
+                  <p className="text-sm text-slate-500 mb-2">{t('truenasApiDesc', language)}</p>
+                  <input
+                    type="text"
+                    value={generalTruenasUrl}
+                    onChange={(e) => setGeneralTruenasUrl(e.target.value)}
+                    placeholder="https://truenas.example.com"
+                    className="w-full px-4 py-2 border border-slate-200 rounded-lg text-sm mb-2"
+                  />
+                  <input
+                    type="password"
+                    value={generalTruenasApiKey}
+                    onChange={(e) => setGeneralTruenasApiKey(e.target.value)}
+                    placeholder={generalTruenasApiKeySet ? t('apiKeyPlaceholderKeep', language) : t('apiKeyPlaceholder', language)}
+                    className="w-full px-4 py-2 border border-slate-200 rounded-lg text-sm"
+                  />
+                </div>
+                <div className="bg-white p-6 rounded-2xl border border-slate-200">
+                  <h3 className="font-bold text-slate-800 mb-3">{t('aiAssistantApiKey', language)}</h3>
+                  <p className="text-sm text-slate-500 mb-2">{t('aiAssistantApiKeyDesc', language)}</p>
+                  <input
+                    type="password"
+                    value={generalAiKey}
+                    onChange={(e) => setGeneralAiKey(e.target.value)}
+                    placeholder={geminiKeySet ? t('apiKeyPlaceholderKeep', language) : t('apiKeyPlaceholder', language)}
+                    className="w-full px-4 py-2 border border-slate-200 rounded-lg text-sm"
+                  />
+                </div>
+                <div className="bg-white p-6 rounded-2xl border border-slate-200">
+                  <h3 className="font-bold text-slate-800 mb-3">{t('mountPath', language)}</h3>
+                  <p className="text-sm text-slate-500 mb-2">{t('mountPathDesc', language)}</p>
+                  <input
+                    type="text"
+                    value={generalMountPath}
+                    onChange={(e) => setGeneralMountPath(e.target.value)}
+                    placeholder="/data"
+                    className="w-full px-4 py-2 border border-slate-200 rounded-lg text-sm"
+                  />
+                </div>
+                <button
+                  type="button"
+                  disabled={generalSaving}
+                  onClick={async () => {
+                    setGeneralSaving(true);
+                    try {
+                      const body: Record<string, unknown> = {
+                        language: generalLanguage,
+                        timezone: generalTimezone,
+                        truenasUrl: generalTruenasUrl,
+                        mountPath: generalMountPath,
+                      };
+                      if (generalTruenasApiKey) body.truenasApiKey = generalTruenasApiKey;
+                      const res = await fetch('/api/settings/general', {
+                        method: 'PUT',
+                        credentials: 'include',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body),
+                      });
+                      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Failed');
+                      if (generalAiKey) {
+                        await saveGeminiKey(generalAiKey);
+                        setGeminiKeySet(true);
+                        setGeneralAiKey('');
+                      }
+                      if (generalTruenasApiKey) {
+                        setGeneralTruenasApiKeySet(true);
+                        setGeneralTruenasApiKey('');
+                      }
+                      setTimezone(generalTimezone);
+                      setLanguage(generalLanguage);
+                      addNotification('Saved', 'General settings updated.', 'success');
+                    } catch (e) {
+                      addNotification('Error', e instanceof Error ? e.message : 'Failed to save.', 'error');
+                    }
+                    setGeneralSaving(false);
+                  }}
+                  className="px-6 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {generalSaving ? t('saving', language) : t('save', language)}
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      }
       case 'health':
         return (
           <div className="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
@@ -229,13 +571,13 @@ const ControlPanel: React.FC = () => {
                 <h3 className="text-sm font-bold text-slate-500 mb-4 flex items-center gap-2">
                   <Database size={16} /> Storage Utilization
                 </h3>
-                <div className="h-40">
+                <div className="relative h-40">
                   <ResponsiveContainer width="100%" height="100%">
                     <PieChart>
                       <Pie
                         data={[
-                          { name: 'Used', value: storageUsedTb && storageTotalTb ? storageUsedTb : 7.2 },
-                          { name: 'Free', value: storageUsedTb && storageTotalTb ? Math.max(storageTotalTb - storageUsedTb, 0) : 2.8 },
+                          { name: 'Used', value: storageUsedTb != null && storageTotalTb != null ? storageUsedTb : 7.2 },
+                          { name: 'Free', value: storageUsedTb != null && storageTotalTb != null ? Math.max(storageTotalTb - storageUsedTb, 0) : 2.8 },
                         ]}
                         cx="50%" cy="50%" innerRadius={50} outerRadius={65} paddingAngle={5} dataKey="value"
                       >
@@ -243,6 +585,13 @@ const ControlPanel: React.FC = () => {
                       </Pie>
                     </PieChart>
                   </ResponsiveContainer>
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                    <span className="text-xl font-bold text-slate-700">
+                      {storageUsedTb != null && storageTotalTb != null && storageTotalTb > 0
+                        ? `${((storageUsedTb / storageTotalTb) * 100).toFixed(0)}%`
+                        : '—'}
+                    </span>
+                  </div>
                 </div>
                 <div className="text-center font-bold text-slate-700">
                   {storageUsedTb && storageTotalTb
@@ -297,16 +646,16 @@ const ControlPanel: React.FC = () => {
                 {systemUptimeSeconds != null && (
                   <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
                     <h3 className="text-sm font-bold text-slate-500 mb-3 flex items-center gap-2">
-                      <Clock size={16} /> 시스템 가동 시간
+                      <Clock size={16} /> System Uptime
                     </h3>
                     <div className="text-2xl font-black text-slate-800">
                       {systemUptimeSeconds >= 86400
-                        ? `${Math.floor(systemUptimeSeconds / 86400)}일 ${Math.floor((systemUptimeSeconds % 86400) / 3600)}시간`
+                        ? `${Math.floor(systemUptimeSeconds / 86400)}d ${Math.floor((systemUptimeSeconds % 86400) / 3600)}h`
                         : systemUptimeSeconds >= 3600
-                          ? `${Math.floor(systemUptimeSeconds / 3600)}시간 ${Math.floor((systemUptimeSeconds % 3600) / 60)}분`
+                          ? `${Math.floor(systemUptimeSeconds / 3600)}h ${Math.floor((systemUptimeSeconds % 3600) / 60)}m`
                           : systemUptimeSeconds >= 60
-                            ? `${Math.floor(systemUptimeSeconds / 60)}분`
-                            : `${Math.floor(systemUptimeSeconds)}초`}
+                            ? `${Math.floor(systemUptimeSeconds / 60)}m`
+                            : `${Math.floor(systemUptimeSeconds)}s`}
                     </div>
                   </div>
                 )}
@@ -317,15 +666,15 @@ const ControlPanel: React.FC = () => {
                     </h3>
                     <div className="flex flex-wrap gap-4">
                       <div>
-                        <div className="text-[10px] font-bold text-slate-400 uppercase">1분</div>
+                        <div className="text-[10px] font-bold text-slate-400 uppercase">1m</div>
                         <div className="text-xl font-black text-slate-800">{loadAverage[0].toFixed(2)}</div>
                       </div>
                       <div>
-                        <div className="text-[10px] font-bold text-slate-400 uppercase">5분</div>
+                        <div className="text-[10px] font-bold text-slate-400 uppercase">5m</div>
                         <div className="text-xl font-black text-slate-800">{loadAverage[1].toFixed(2)}</div>
                       </div>
                       <div>
-                        <div className="text-[10px] font-bold text-slate-400 uppercase">15분</div>
+                        <div className="text-[10px] font-bold text-slate-400 uppercase">15m</div>
                         <div className="text-xl font-black text-slate-800">{loadAverage[2].toFixed(2)}</div>
                       </div>
                     </div>
@@ -350,14 +699,14 @@ const ControlPanel: React.FC = () => {
                   <>
                     <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
                       <h3 className="text-sm font-bold text-slate-500 mb-3 flex items-center gap-2">
-                        <Database size={16} /> TrueNAS 스토리지 풀
+                        <Database size={16} /> TrueNAS Storage Pool
                       </h3>
                       <div className="space-y-2">
                         {truenasPools.map((p) => (
                           <div key={p.name} className="p-2 rounded-lg bg-slate-50 border border-slate-100 flex items-center justify-between gap-2">
                             <div className="font-bold text-slate-800 text-sm">{p.name}</div>
                             <span className={`text-xs font-medium px-2 py-0.5 rounded ${p.healthy ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
-                              {p.healthy ? '정상' : '이상'}
+                              {p.healthy ? 'Healthy' : 'Degraded'}
                             </span>
                           </div>
                         ))}
@@ -366,7 +715,7 @@ const ControlPanel: React.FC = () => {
                     {(cpuModel != null || cpuCores != null || cpuUsage != null) && (
                       <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
                         <h3 className="text-sm font-bold text-slate-500 mb-3 flex items-center gap-2">
-                          <Cpu size={16} /> CPU 정보
+                          <Cpu size={16} /> CPU Info
                         </h3>
                         <div className="space-y-1.5">
                           {cpuModel != null && (
@@ -376,9 +725,9 @@ const ControlPanel: React.FC = () => {
                           )}
                           {(cpuCores != null || cpuUsage != null) && (
                             <div className="text-xs text-slate-500">
-                              {cpuCores != null && `${cpuCores}코어`}
+                              {cpuCores != null && `${cpuCores} cores`}
                               {cpuCores != null && cpuUsage != null && ' · '}
-                              {cpuUsage != null && `사용률 ${cpuUsage.toFixed(1)}%`}
+                              {cpuUsage != null && `${cpuUsage.toFixed(1)}% usage`}
                             </div>
                           )}
                         </div>
@@ -389,7 +738,7 @@ const ControlPanel: React.FC = () => {
                         {truenasPools.some((p) => p.topology?.length) && (
                           <div>
                             <h4 className="text-xs font-bold text-slate-400 uppercase mb-2 flex items-center gap-2">
-                              <Layers size={14} /> RAID 구성
+                              <Layers size={14} /> RAID Configuration
                             </h4>
                             <div className="space-y-3">
                               {truenasPools.map((p) =>
@@ -415,16 +764,16 @@ const ControlPanel: React.FC = () => {
                         {truenasDisks.length > 0 && (
                           <div>
                             <h4 className="text-xs font-bold text-slate-400 uppercase mb-2 flex items-center gap-2">
-                              <HardDrive size={14} /> 디스크 정보
+                              <HardDrive size={14} /> Disk Info
                             </h4>
                             <div className="overflow-x-auto">
                               <table className="w-full text-sm">
                                 <thead>
                                   <tr className="text-left text-slate-500 border-b border-slate-200">
-                                    <th className="py-2 pr-3 font-medium">이름</th>
-                                    <th className="py-2 pr-3 font-medium">용량</th>
-                                    <th className="py-2 pr-3 font-medium">모델</th>
-                                    <th className="py-2 font-medium">풀</th>
+                                    <th className="py-2 pr-3 font-medium">Name</th>
+                                    <th className="py-2 pr-3 font-medium">Size</th>
+                                    <th className="py-2 pr-3 font-medium">Model</th>
+                                    <th className="py-2 font-medium">Pool</th>
                                   </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
@@ -452,10 +801,10 @@ const ControlPanel: React.FC = () => {
                 {raidArrays.length === 0 && truenasPools.length === 0 && (
                   <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
                     <h3 className="text-sm font-bold text-slate-500 mb-3 flex items-center gap-2">
-                      <Layers size={16} /> RAID / 스토리지 풀
+                      <Layers size={16} /> RAID / Storage Pools
                     </h3>
                     <p className="text-sm text-slate-500">
-                      Docker 환경에서는 호스트 RAID가 보이지 않습니다. <strong>TrueNAS</strong> 스토리지 풀을 표시하려면 <code className="text-xs bg-slate-100 px-1 rounded">TRUENAS_URL</code>, <code className="text-xs bg-slate-100 px-1 rounded">TRUENAS_API_KEY</code>를 docker-compose 환경 변수에 설정한 뒤 컨테이너를 재시작하세요.
+                      Host RAID is not visible in Docker. To show <strong>TrueNAS</strong> storage pools, set <code className="text-xs bg-slate-100 px-1 rounded">TRUENAS_URL</code> and <code className="text-xs bg-slate-100 px-1 rounded">TRUENAS_API_KEY</code> in General settings or in docker-compose, then restart the container.
                     </p>
                   </div>
                 )}
@@ -499,22 +848,120 @@ const ControlPanel: React.FC = () => {
         );
       case 'security':
         return (
-          <div className="space-y-6 animate-in fade-in duration-300">
-             <h1 className="text-2xl font-bold text-slate-800 mb-6">Security Advisor</h1>
-             <div className="grid grid-cols-2 gap-6">
-               <div className="bg-white p-6 rounded-2xl border border-slate-200">
-                 <ShieldAlert className="text-amber-500 mb-4" size={32} />
-                 <h3 className="font-bold text-slate-800 mb-2">Firewall Status</h3>
-                 <p className="text-sm text-slate-500 mb-4">Firewall is currently enabled with 3 active rules.</p>
-                 <button className="text-sm font-bold text-blue-600 hover:underline">Edit Rules →</button>
-               </div>
-               <div className="bg-white p-6 rounded-2xl border border-slate-200">
-                 <Key className="text-emerald-500 mb-4" size={32} />
-                 <h3 className="font-bold text-slate-800 mb-2">Login Protection</h3>
-                 <p className="text-sm text-slate-500 mb-4">2-Step verification is active for administrative accounts.</p>
-                 <button className="text-sm font-bold text-blue-600 hover:underline">Settings →</button>
-               </div>
-             </div>
+          <div className="space-y-6 overflow-y-auto min-h-full">
+            <h1 className="text-2xl font-bold text-slate-800 mb-6">Security Advisor</h1>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 min-w-0">
+              <div className="bg-white p-6 rounded-2xl border border-slate-200 min-w-0 overflow-hidden">
+                <ShieldAlert className="text-amber-500 mb-4" size={32} />
+                <h3 className="font-bold text-slate-800 mb-2">Firewall Status</h3>
+                <p className="text-sm text-slate-500 mb-4">
+                  {firewallLoading ? 'Loading…' : firewallEnabled ? `Firewall is enabled with ${(firewallRules?.length ?? 0)} active rule(s).` : 'Firewall is disabled.'}
+                </p>
+                <button type="button" onClick={() => setFirewallModalOpen(true)} className="text-sm font-bold text-blue-600 hover:underline">Edit Rules →</button>
+              </div>
+              <div className="bg-white p-6 rounded-2xl border border-slate-200 min-w-0 overflow-hidden">
+                <Key className="text-emerald-500 mb-4" size={32} />
+                <h3 className="font-bold text-slate-800 mb-2">Login Protection (2-Step Verification)</h3>
+                <div className="flex items-center justify-between gap-4 mb-4 min-w-0">
+                  <p className="text-sm text-slate-500 min-w-0">
+                    {twoFaEnabled ? (twoFaVerified ? '2-Step verification is on. You are signed in.' : '2-Step verification is on. Enter code when prompted.') : '2-Step verification is off. Turn on to require a code when signing in.'}
+                  </p>
+                  <label className="flex items-center gap-2 shrink-0 cursor-pointer">
+                    <span className="text-sm font-medium text-slate-700">OFF</span>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={twoFaEnabled}
+                      className={`relative inline-flex h-6 w-11 flex-shrink-0 rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${twoFaEnabled ? 'bg-blue-600' : 'bg-slate-200'}`}
+                      onClick={async () => {
+                        if (twoFaEnabled) {
+                          try {
+                            await fetch('/api/security/2fa/disable', { method: 'POST', credentials: 'include' });
+                            setTwoFaEnabled(false);
+                            setTwoFaVerified(false);
+                            setTwoFaSetupQr(null);
+                            setTwoFaSetupSecret('');
+                            addNotification('2FA disabled', 'Login protection is now off.', 'success');
+                          } catch {
+                            addNotification('Error', 'Failed to disable 2FA.', 'error');
+                          }
+                        } else {
+                          setTwoFaModalOpen(true);
+                        }
+                      }}
+                    >
+                      <span className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0 transition-transform ${twoFaEnabled ? 'translate-x-5' : 'translate-x-1'}`} />
+                    </button>
+                    <span className="text-sm font-medium text-slate-700">ON</span>
+                  </label>
+                </div>
+                <button type="button" onClick={() => setTwoFaModalOpen(true)} className="text-sm font-bold text-blue-600 hover:underline shrink-0">Settings →</button>
+              </div>
+            </div>
+
+            {firewallModalOpen && (
+              <FirewallModal
+                enabled={firewallEnabled}
+                rules={Array.isArray(firewallRules) ? firewallRules : []}
+                onClose={() => setFirewallModalOpen(false)}
+                onSave={async (enabled, rules) => {
+                  try {
+                    const res = await fetch('/api/security/firewall', {
+                      method: 'PUT',
+                      credentials: 'include',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ enabled, rules }),
+                    });
+                    if (!res.ok) throw new Error();
+                    const d = await res.json();
+                    setFirewallEnabled(d.enabled);
+                    setFirewallRules(d.rules || []);
+                    addNotification('Saved', 'Firewall rules updated.', 'success');
+                    setFirewallModalOpen(false);
+                  } catch {
+                    addNotification('Error', 'Failed to save firewall rules.', 'error');
+                  }
+                }}
+              />
+            )}
+            {twoFaModalOpen && (
+              <TwoFaModal
+                enabled={twoFaEnabled}
+                verified={twoFaVerified}
+                qrDataUrl={twoFaSetupQr}
+                secret={twoFaSetupSecret}
+                onClose={() => {
+                  setTwoFaModalOpen(false);
+                  setTwoFaSetupQr(null);
+                  setTwoFaSetupSecret('');
+                }}
+                onEnable={async () => {
+                  try {
+                    const res = await fetch('/api/security/2fa/setup', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' } });
+                    const d = await res.json();
+                    if (d.qrDataUrl) setTwoFaSetupQr(d.qrDataUrl);
+                    if (d.secret) setTwoFaSetupSecret(d.secret);
+                    setTwoFaEnabled(true);
+                    addNotification('2FA enabled', 'Scan the QR code with your authenticator app.', 'success');
+                  } catch {
+                    addNotification('Error', 'Failed to enable 2FA.', 'error');
+                  }
+                }}
+                onDisable={async () => {
+                  try {
+                    await fetch('/api/security/2fa/disable', { method: 'POST', credentials: 'include' });
+                    setTwoFaEnabled(false);
+                    setTwoFaVerified(false);
+                    setTwoFaSetupQr(null);
+                    setTwoFaSetupSecret('');
+                    addNotification('2FA disabled', 'Login protection has been turned off.', 'success');
+                    setTwoFaModalOpen(false);
+                  } catch {
+                    addNotification('Error', 'Failed to disable 2FA.', 'error');
+                  }
+                }}
+              />
+            )}
           </div>
         );
       case 'display':
@@ -524,17 +971,17 @@ const ControlPanel: React.FC = () => {
 
             <div className="bg-white p-6 rounded-2xl border border-slate-200">
               <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Palette size={18} /> Theme</h3>
-              <p className="text-sm text-slate-500 mb-4">데스크톱 오버레이와 가독성을 조정합니다.</p>
+              <p className="text-sm text-slate-500 mb-4">Adjust desktop overlay and readability.</p>
               <div className="grid grid-cols-3 gap-4">
                 {([
-                  { id: 'light' as ThemeMode, label: 'Light', desc: '밝은 오버레이', className: 'bg-slate-200 text-slate-700 border-slate-300' },
-                  { id: 'dark' as ThemeMode, label: 'Dark', desc: '어두운 오버레이', className: 'bg-slate-800 text-white border-slate-600' },
-                  { id: 'dynamic' as ThemeMode, label: 'Dynamic', desc: '시스템 설정 따름', className: 'bg-gradient-to-br from-blue-500 to-purple-600 text-white border-slate-400' },
+                  { id: 'light' as ThemeMode, label: 'Light', desc: 'Light overlay', className: 'bg-slate-200 text-slate-700 border-slate-300' },
+                  { id: 'dark' as ThemeMode, label: 'Dark', desc: 'Dark overlay', className: 'bg-slate-800 text-white border-slate-600' },
+                  { id: 'dynamic' as ThemeMode, label: 'Dynamic', desc: 'Follow system', className: 'bg-gradient-to-br from-blue-500 to-purple-600 text-white border-slate-400' },
                 ]).map((opt) => (
                   <button
                     key={opt.id}
                     type="button"
-                    onClick={() => { setTheme(opt.id); addNotification('적용됨', `테마: ${opt.label}`, 'success'); }}
+                    onClick={() => { setTheme(opt.id); addNotification('Applied', `Theme: ${opt.label}`, 'success'); }}
                     className={`aspect-video rounded-xl border-2 flex flex-col items-center justify-center gap-1 transition-all hover:scale-[1.02] ${theme === opt.id ? 'ring-2 ring-blue-500 ring-offset-2 border-blue-500' : 'border-slate-300'} ${opt.className}`}
                   >
                     <span className="text-sm font-bold">{opt.label}</span>
@@ -546,13 +993,13 @@ const ControlPanel: React.FC = () => {
 
             <div className="bg-white p-6 rounded-2xl border border-slate-200">
               <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Monitor size={18} /> Background</h3>
-              <p className="text-sm text-slate-500 mb-4">데스크톱 배경을 선택하세요.</p>
+              <p className="text-sm text-slate-500 mb-4">Choose desktop background.</p>
               <div className="grid grid-cols-4 gap-3">
                 {BACKGROUND_PRESETS.map((preset) => (
                   <button
                     key={preset.id}
                     type="button"
-                    onClick={() => { setBackground(preset.id); addNotification('적용됨', `배경: ${preset.label}`, 'success'); }}
+                    onClick={() => { setBackground(preset.id); addNotification('Applied', `Background: ${preset.label}`, 'success'); }}
                     className={`rounded-xl h-16 border-2 overflow-hidden transition-all hover:scale-[1.03] ${background === preset.id ? 'ring-2 ring-blue-500 ring-offset-2 border-blue-500' : 'border-slate-200'}`}
                     style={preset.style}
                     title={preset.label}
@@ -579,10 +1026,10 @@ const ControlPanel: React.FC = () => {
                   />
                   <button
                     type="button"
-                    onClick={() => { setBackgroundCustomUrl(backgroundCustomUrl); addNotification('적용됨', '배경 URL이 적용되었습니다.', 'success'); }}
+                    onClick={() => { setBackgroundCustomUrl(backgroundCustomUrl); addNotification('Applied', 'Background URL has been applied.', 'success'); }}
                     className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
                   >
-                    적용
+                    Apply
                   </button>
                 </div>
               )}
@@ -598,14 +1045,14 @@ const ControlPanel: React.FC = () => {
                 <Bot size={18} /> Gemini API Key
               </h3>
               <p className="text-sm text-slate-500 mb-4">
-                AI Assistant(Gemini) 사용을 위해 Google AI Studio에서 발급한 API Key를 입력하세요. 키는 서버에 AES-256-GCM으로 암호화되어 저장됩니다.
+                Enter the API key from Google AI Studio for AI Assistant (Gemini). The key is stored encrypted on the server.
               </p>
               <div className="flex flex-col sm:flex-row gap-3">
                 <input
                   type="password"
                   value={aiApiKeyInput}
                   onChange={(e) => setAiApiKeyInput(e.target.value)}
-                  placeholder={geminiKeySet ? '••••••••••••••••' : 'API Key 입력'}
+                  placeholder={geminiKeySet ? '••••••••••••••••' : 'API key'}
                   className="flex-1 px-4 py-2.5 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
                   autoComplete="off"
                 />
@@ -616,18 +1063,18 @@ const ControlPanel: React.FC = () => {
                       await saveGeminiKey(aiApiKeyInput);
                       setAiApiKeyInput('');
                       setGeminiKeySet(true);
-                      addNotification('저장됨', 'AI Assistant API Key가 서버에 암호화되어 저장되었습니다.', 'success');
+                      addNotification('Saved', 'AI Assistant API key has been stored encrypted.', 'success');
                     } catch (e) {
-                      addNotification('저장 실패', e instanceof Error ? e.message : 'Failed to save', 'warning');
+                      addNotification('Save failed', e instanceof Error ? e.message : 'Failed to save', 'warning');
                     }
                   }}
                   className="px-4 py-2.5 bg-blue-600 text-white rounded-xl text-sm font-medium hover:bg-blue-700 transition-colors shrink-0"
                 >
-                  저장
+                  Save
                 </button>
               </div>
               {geminiKeySet && (
-                <p className="text-xs text-emerald-600 mt-2 font-medium">API Key가 설정되어 있습니다. 새 키로 바꾸려면 위에 입력 후 저장하세요.</p>
+                <p className="text-xs text-emerald-600 mt-2 font-medium">API key is set. Enter a new key above and save to replace.</p>
               )}
             </div>
           </div>
@@ -638,8 +1085,8 @@ const ControlPanel: React.FC = () => {
             <h1 className="text-2xl font-bold text-slate-800 mb-6">SFTP</h1>
 
             <div className="bg-white p-6 rounded-2xl border border-slate-200">
-              <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Server size={18} /> 포트</h3>
-              <p className="text-sm text-slate-500 mb-4">SFTP 서버에 접속할 때 사용할 포트(1–65535). 변경 후 적용하려면 아래 Apply 또는 Restart SFTP를 실행하세요.</p>
+              <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Server size={18} /> Port</h3>
+              <p className="text-sm text-slate-500 mb-4">Port for SFTP access (1–65535). Run Apply or Restart SFTP below to apply changes.</p>
               <div className="flex items-center gap-3">
                 <input
                   type="number"
@@ -657,42 +1104,42 @@ const ControlPanel: React.FC = () => {
                       const res = await fetch('/api/sftp/config/port', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ port }) });
                       const data = await res.json();
                       if (data.ok) {
-                        addNotification('저장됨', `SFTP 포트가 ${port}(으)로 저장되었습니다.`, 'success');
+                        addNotification('Saved', `SFTP port set to ${port}.`, 'success');
                         const r = await fetch('/api/sftp/config');
                         const j = await r.json();
                         if (j?.ok) setSftpConfig((c) => (c ? { ...c, port: j.port } : null));
-                      } else addNotification('실패', data.error || '저장 실패', 'warning');
+                      } else addNotification('Failed', data.error || 'Save failed', 'warning');
                     } catch (e) {
-                      addNotification('오류', e instanceof Error ? e.message : 'Failed', 'warning');
+                      addNotification('Error', e instanceof Error ? e.message : 'Failed', 'warning');
                     }
                   }}
                   className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
                 >
-                  포트 저장
+                  Save port
                 </button>
               </div>
             </div>
 
             <div className="bg-white p-6 rounded-2xl border border-slate-200">
-              <h3 className="font-bold text-slate-800 mb-4">사용자 추가 (Pending)</h3>
+              <h3 className="font-bold text-slate-800 mb-4">Add user (Pending)</h3>
               <div className="flex flex-wrap gap-3 mb-4">
                 <input
                   type="text"
-                  placeholder="사용자명"
+                  placeholder="Username"
                   value={sftpAddName}
                   onChange={(e) => setSftpAddName(e.target.value)}
                   className="px-3 py-2 border border-slate-200 rounded-lg text-sm w-32"
                 />
                 <input
                   type="password"
-                  placeholder="비밀번호"
+                  placeholder="Password"
                   value={sftpAddPassword}
                   onChange={(e) => setSftpAddPassword(e.target.value)}
                   className="px-3 py-2 border border-slate-200 rounded-lg text-sm w-32"
                 />
                 <input
                   type="text"
-                  placeholder="마운트 경로 (예: KJEFILM 또는 /mnt/...)"
+                  placeholder="Mount path (e.g. KJEFILM or /mnt/...)"
                   value={sftpAddMount}
                   onChange={(e) => setSftpAddMount(e.target.value)}
                   className="px-3 py-2 border border-slate-200 rounded-lg text-sm flex-1 min-w-[180px]"
@@ -701,7 +1148,7 @@ const ControlPanel: React.FC = () => {
                   type="button"
                   onClick={async () => {
                     if (!sftpAddName.trim() || !sftpAddMount.trim()) {
-                      addNotification('입력 필요', '사용자명과 마운트 경로를 입력하세요.', 'warning');
+                      addNotification('Required', 'Enter username and mount path.', 'warning');
                       return;
                     }
                     try {
@@ -709,24 +1156,24 @@ const ControlPanel: React.FC = () => {
                       const data = await res.json();
                       if (data.ok) {
                         setSftpAddName(''); setSftpAddPassword(''); setSftpAddMount('');
-                        addNotification('추가됨', `${sftpAddName}이(가) Pending에 추가되었습니다. Apply로 반영하세요.`, 'success');
+                        addNotification('Added', `${sftpAddName} added to Pending. Run Apply to reflect.`, 'success');
                         const r = await fetch('/api/sftp/config');
                         const j = await r.json();
                         if (j?.ok) setSftpConfig({ port: j.port, users: j.users || [], pending: j.pending || [], delete_pending: j.delete_pending || [] });
-                      } else addNotification('실패', data.error || '추가 실패', 'warning');
+                      } else addNotification('Failed', data.error || 'Add failed', 'warning');
                     } catch (e) {
-                      addNotification('오류', e instanceof Error ? e.message : 'Failed', 'warning');
+                      addNotification('Error', e instanceof Error ? e.message : 'Failed', 'warning');
                     }
                   }}
                   className="px-4 py-2 bg-slate-700 text-white rounded-lg text-sm font-medium hover:bg-slate-800"
                 >
-                  Pending 추가
+                  Add to Pending
                 </button>
               </div>
             </div>
 
             <div className="bg-white p-6 rounded-2xl border border-slate-200">
-              <h3 className="font-bold text-slate-800 mb-4">사용자 목록</h3>
+              <h3 className="font-bold text-slate-800 mb-4">User list</h3>
               <div className="space-y-2 mb-4">
                 {sftpConfig?.pending?.map((u) => (
                   <div key={u.name} className="flex items-center justify-between py-2 border-b border-slate-100">
@@ -740,13 +1187,13 @@ const ControlPanel: React.FC = () => {
                         const j = await r.json();
                         if (j?.ok) setSftpConfig({ port: j.port, users: j.users || [], pending: j.pending || [], delete_pending: j.delete_pending || [] });
                       } catch {}
-                    }} className="text-red-600 text-sm hover:underline">삭제</button>
+                    }} className="text-red-600 text-sm hover:underline">Delete</button>
                   </div>
                 ))}
                 {sftpConfig?.users?.map((u) => (
                   <div key={u.name} className="flex items-center justify-between py-2 border-b border-slate-100">
                     <span className={`font-mono text-xs px-2 py-1 rounded ${(sftpConfig?.delete_pending || []).includes(u.name) ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-600'}`}>
-                      {(sftpConfig?.delete_pending || []).includes(u.name) ? '삭제 예정' : (u.enabled !== false ? '활성' : '비활성')}
+                      {(sftpConfig?.delete_pending || []).includes(u.name) ? 'Delete pending' : (u.enabled !== false ? 'Active' : 'Inactive')}
                     </span>
                     <span className="font-medium">{u.name}</span>
                     <span className="text-slate-500 text-sm truncate max-w-[200px]">{u.mount}</span>
@@ -758,9 +1205,9 @@ const ControlPanel: React.FC = () => {
                             const r = await fetch('/api/sftp/config');
                             const j = await r.json();
                             if (j?.ok) setSftpConfig({ port: j.port, users: j.users || [], pending: j.pending || [], delete_pending: j.delete_pending || [] });
-                            addNotification('적용됨', `사용자 ${u.name} 상태가 반영되었습니다.`, 'success');
-                          } catch (e) { addNotification('오류', e instanceof Error ? e.message : 'Failed', 'warning'); }
-                        }} className="text-blue-600 text-sm hover:underline">{u.enabled !== false ? '비활성' : '활성'}</button>
+                            addNotification('Applied', `User ${u.name} state has been updated.`, 'success');
+                          } catch (e) { addNotification('Error', e instanceof Error ? e.message : 'Failed', 'warning'); }
+                        }} className="text-blue-600 text-sm hover:underline">{u.enabled !== false ? 'Deactivate' : 'Activate'}</button>
                       )}
                       {!(sftpConfig?.delete_pending || []).includes(u.name) ? (
                         <button type="button" onClick={async () => {
@@ -769,9 +1216,9 @@ const ControlPanel: React.FC = () => {
                             const r = await fetch('/api/sftp/config');
                             const j = await r.json();
                             if (j?.ok) setSftpConfig({ port: j.port, users: j.users || [], pending: j.pending || [], delete_pending: j.delete_pending || [] });
-                            addNotification('삭제 예정', `Restart SFTP 시 ${u.name}이(가) 제거됩니다.`, 'info');
+                            addNotification('Delete pending', `${u.name} will be removed on Restart SFTP.`, 'info');
                           } catch {}
-                        }} className="text-red-600 text-sm hover:underline">삭제 예정</button>
+                        }} className="text-red-600 text-sm hover:underline">Mark delete</button>
                       ) : (
                         <button type="button" onClick={async () => {
                           try {
@@ -780,13 +1227,13 @@ const ControlPanel: React.FC = () => {
                             const j = await r.json();
                             if (j?.ok) setSftpConfig({ port: j.port, users: j.users || [], pending: j.pending || [], delete_pending: j.delete_pending || [] });
                           } catch {}
-                        }} className="text-slate-600 text-sm hover:underline">취소</button>
+                        }} className="text-slate-600 text-sm hover:underline">Cancel</button>
                       )}
                     </div>
                   </div>
                 ))}
                 {(!sftpConfig?.users?.length && !sftpConfig?.pending?.length) && (
-                  <p className="text-slate-500 text-sm">등록된 사용자가 없습니다. 위에서 Pending 추가 후 Apply하세요.</p>
+                  <p className="text-slate-500 text-sm">No users registered. Add to Pending above, then run Apply.</p>
                 )}
               </div>
               <div className="flex gap-3 pt-4 border-t border-slate-200">
@@ -797,34 +1244,34 @@ const ControlPanel: React.FC = () => {
                       const res = await fetch('/api/sftp/apply', { method: 'POST' });
                       const data = await res.json();
                       if (data.ok) {
-                        addNotification('적용됨', 'Pending이 반영되고 SFTP 컨테이너가 갱신되었습니다.', 'success');
+                        addNotification('Applied', 'Pending users applied and SFTP container updated.', 'success');
                         const r = await fetch('/api/sftp/config');
                         const j = await r.json();
                         if (j?.ok) setSftpConfig({ port: j.port, users: j.users || [], pending: j.pending || [], delete_pending: j.delete_pending || [] });
-                      } else addNotification('실패', data.error || 'Apply 실패', 'warning');
+                      } else addNotification('Failed', data.error || 'Apply failed', 'warning');
                     } catch (e) {
-                      addNotification('오류', e instanceof Error ? e.message : 'Apply failed', 'warning');
+                      addNotification('Error', e instanceof Error ? e.message : 'Apply failed', 'warning');
                     }
                   }}
                   className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
                 >
-                  Apply (Pending → 반영)
+                  Apply (Pending → active)
                 </button>
                 <button
                   type="button"
                   onClick={async () => {
-                    if (!confirm('삭제 예정 사용자를 반영하고 SFTP를 재시작합니다. 접속 중인 세션이 끊길 수 있습니다. 계속할까요?')) return;
+                    if (!confirm('Apply delete-pending users and restart SFTP. Active sessions may be disconnected. Continue?')) return;
                     try {
                       const res = await fetch('/api/sftp/restart', { method: 'POST' });
                       const data = await res.json();
                       if (data.ok) {
-                        addNotification('재시작됨', 'SFTP가 삭제 예정 반영 후 재시작되었습니다.', 'success');
+                        addNotification('Restarted', 'SFTP restarted with delete-pending applied.', 'success');
                         const r = await fetch('/api/sftp/config');
                         const j = await r.json();
                         if (j?.ok) setSftpConfig({ port: j.port, users: j.users || [], pending: j.pending || [], delete_pending: j.delete_pending || [] });
-                      } else addNotification('실패', data.error || 'Restart 실패', 'warning');
+                      } else addNotification('Failed', data.error || 'Restart failed', 'warning');
                     } catch (e) {
-                      addNotification('오류', e instanceof Error ? e.message : 'Restart failed', 'warning');
+                      addNotification('Error', e instanceof Error ? e.message : 'Restart failed', 'warning');
                     }
                   }}
                   className="px-4 py-2 bg-amber-600 text-white rounded-lg text-sm font-medium hover:bg-amber-700"
@@ -838,7 +1285,12 @@ const ControlPanel: React.FC = () => {
       case 'network':
         return (
           <div className="space-y-6 animate-in fade-in duration-300">
-            <h1 className="text-2xl font-bold text-slate-800 mb-6">Network Settings</h1>
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <h1 className="text-2xl font-bold text-slate-800">Network Settings</h1>
+              {networkData?.source === 'truenas' && (
+                <span className="text-xs font-medium text-blue-600 bg-blue-50 px-2 py-1 rounded">From TrueNAS</span>
+              )}
+            </div>
             <div className="bg-white p-6 rounded-2xl border border-slate-200 space-y-4">
               {networkLoading && (
                 <p className="text-sm text-slate-500">Loading...</p>
@@ -896,7 +1348,7 @@ const ControlPanel: React.FC = () => {
                 </>
               )}
               {!networkLoading && !networkData && (
-                <p className="text-sm text-slate-500">서버에서 네트워크 정보를 불러올 수 없습니다.</p>
+                <p className="text-sm text-slate-500">Could not load network information from the server.</p>
               )}
             </div>
           </div>
@@ -905,33 +1357,33 @@ const ControlPanel: React.FC = () => {
         return (
           <div className="space-y-6 animate-in fade-in duration-300">
             <div className="flex items-center justify-between flex-wrap gap-2">
-              <h1 className="text-2xl font-bold text-slate-800">사용 중인 포트</h1>
-              <p className="text-sm text-slate-500">컨테이너(CloudStation) 및 TrueNAS 시스템 포트 (10초마다 갱신)</p>
+              <h1 className="text-2xl font-bold text-slate-800">Ports in Use</h1>
+              <p className="text-sm text-slate-500">Container (CloudStation) and TrueNAS ports (refreshed every 10s)</p>
             </div>
 
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
               <div className="px-6 py-3 border-b border-slate-200 bg-slate-50">
-                <h2 className="text-sm font-semibold text-slate-700">이 컨테이너 (CloudStation) — LISTEN</h2>
-                <p className="text-xs text-slate-500 mt-0.5">이 컨테이너 내부에서 리스닝 중인 포트 (호스트와 1:1 매핑이면 동일 번호)</p>
+                <h2 className="text-sm font-semibold text-slate-700">This Container (CloudStation) — LISTEN</h2>
+                <p className="text-xs text-slate-500 mt-0.5">Ports listening inside this container (same as host if 1:1 mapping)</p>
               </div>
               {listeningPortsLoading && listeningPorts.length === 0 && dockerPorts.length === 0 && truenasPorts.length === 0 ? (
-                <div className="p-8 text-center text-slate-500">불러오는 중...</div>
+                <div className="p-8 text-center text-slate-500">Loading…</div>
               ) : listeningPorts.length === 0 ? (
-                <div className="p-6 text-center text-slate-500">LISTEN 중인 포트가 없습니다.</div>
+                <div className="p-6 text-center text-slate-500">No ports in LISTEN state.</div>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full text-left">
-                    <thead className="bg-slate-50/70 border-b border-slate-200">
+                    <thead className="bg-slate-50 border-b border-slate-200">
                       <tr>
-                        <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">#</th>
+                        <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Name</th>
                         <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Port</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {listeningPorts.map((port, i) => (
-                        <tr key={`c-${port}`} className="hover:bg-slate-50/50">
-                          <td className="px-6 py-3 text-sm text-slate-500 font-medium">{i + 1}</td>
-                          <td className="px-6 py-3 font-mono text-slate-800 font-semibold">{port}</td>
+                      {listeningPorts.map((row) => (
+                        <tr key={`c-${row.port}`} className="hover:bg-slate-50/50">
+                          <td className="px-6 py-3 text-sm text-slate-700 font-medium">{row.name}</td>
+                          <td className="px-6 py-3 font-mono text-slate-800 font-semibold">{row.port}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -943,16 +1395,16 @@ const ControlPanel: React.FC = () => {
             {dockerPorts.length > 0 && (
               <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
                 <div className="px-6 py-3 border-b border-slate-200 bg-slate-50">
-                  <h2 className="text-sm font-semibold text-slate-700">Docker (호스트 포트 매핑)</h2>
-                  <p className="text-xs text-slate-500 mt-0.5">접속 시 사용하는 건 호스트 포트입니다. 컨테이너 내부 포트는 참고용.</p>
+                  <h2 className="text-sm font-semibold text-slate-700">Docker (Host Port Mapping)</h2>
+                  <p className="text-xs text-slate-500 mt-0.5">Use host port to connect. Container port is for reference.</p>
                 </div>
                 <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
                   <table className="w-full text-left">
-                    <thead className="bg-slate-50/70 border-b border-slate-200 sticky top-0">
+                    <thead className="bg-white border-b border-slate-200 sticky top-0 z-10 shadow-[0_1px_0_0_rgba(0,0,0,0.05)]">
                       <tr>
-                        <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">컨테이너</th>
-                        <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">호스트 포트</th>
-                        <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">컨테이너(내부)</th>
+                        <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider bg-white">Container</th>
+                        <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider bg-white">Host Port</th>
+                        <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider bg-white">Container (internal)</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -972,13 +1424,13 @@ const ControlPanel: React.FC = () => {
             {truenasPorts.length > 0 && (
               <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
                 <div className="px-6 py-3 border-b border-slate-200 bg-slate-50">
-                  <h2 className="text-sm font-semibold text-slate-700">TrueNAS 시스템</h2>
+                  <h2 className="text-sm font-semibold text-slate-700">TrueNAS System</h2>
                 </div>
                 <div className="overflow-x-auto">
                   <table className="w-full text-left">
-                    <thead className="bg-slate-50/70 border-b border-slate-200">
+                    <thead className="bg-slate-50 border-b border-slate-200">
                       <tr>
-                        <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">서비스</th>
+                        <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Service</th>
                         <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Port</th>
                       </tr>
                     </thead>
@@ -1042,65 +1494,120 @@ const ControlPanel: React.FC = () => {
   };
 
   const menuGroups = [
-    {
-      title: 'System Information',
-      items: [
-        { id: 'health', label: 'Health', icon: Activity },
-        { id: 'ports', label: 'Ports', icon: Globe },
-        { id: 'system-log', label: 'System Log', icon: FileText },
-      ]
-    },
-    {
-      title: 'User & Access',
-      items: [
-        { id: 'users', label: 'User & Groups', icon: Users },
-        { id: 'security', label: 'Security', icon: Shield },
-      ]
-    },
-    {
-      title: 'Personalization',
-      items: [
-        { id: 'display', label: 'Theme & Display', icon: Monitor },
-        { id: 'network', label: 'Network', icon: Wifi },
-      ]
-    },
-    {
-      title: 'Services',
-      items: [
-        { id: 'sftp', label: 'SFTP', icon: Server },
-        { id: 'update', label: 'Update & Restore', icon: RefreshCw },
-        { id: 'ai-assistant', label: 'AI Assistant', icon: Bot },
-      ]
-    }
+    { titleKey: 'menuGeneral' as const, items: [{ id: 'general', labelKey: 'general' as const, icon: Settings }] },
+    { titleKey: 'menuSystemInfo' as const, items: [{ id: 'health', labelKey: 'health', icon: Activity }, { id: 'ports', labelKey: 'ports', icon: Globe }, { id: 'system-log', labelKey: 'systemLog', icon: FileText }] },
+    { titleKey: 'menuUserAccess' as const, items: [{ id: 'users', labelKey: 'userAndGroups', icon: Users }, { id: 'login-settings', labelKey: 'requireLogin', icon: Lock, openModal: true }, { id: 'security', labelKey: 'security', icon: Shield }] },
+    { titleKey: 'menuPersonalization' as const, items: [{ id: 'display', labelKey: 'themeAndDisplay', icon: Monitor }, { id: 'network', labelKey: 'network', icon: Wifi }] },
+    { titleKey: 'menuServices' as const, items: [{ id: 'sftp', labelKey: 'sftp', icon: Server }, { id: 'update', labelKey: 'updateRestore', icon: RefreshCw }, { id: 'ai-assistant', labelKey: 'aiAssistant', icon: Bot }] },
   ];
 
   return (
-    <div className="flex h-full bg-slate-50 text-slate-700">
+    <>
+      {show2FAGate && createPortal(
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/95"
+          style={{ top: 0, left: 0, right: 0, bottom: 0, minWidth: '100vw', minHeight: '100dvh' }}
+        >
+          <div className="bg-white rounded-2xl shadow-xl p-8 max-w-sm w-full">
+            <h2 className="text-lg font-bold text-slate-800 mb-2">2-Step Verification</h2>
+            <p className="text-sm text-slate-500 mb-4">Enter the code from your authenticator app.</p>
+            <input
+              type="text"
+              value={twoFaCode}
+              onChange={(e) => { setTwoFaCode(e.target.value.replace(/\D/g, '').slice(0, 6)); setTwoFaVerifyError(''); }}
+              placeholder="000000"
+              className="w-full px-4 py-3 border border-slate-200 rounded-lg text-center text-lg font-mono tracking-widest mb-2"
+              maxLength={6}
+            />
+            {twoFaVerifyError && <p className="text-sm text-red-600 mb-2">{twoFaVerifyError}</p>}
+            <button
+              type="button"
+              onClick={async () => {
+                const code = twoFaCode.trim();
+                if (!code) { setTwoFaVerifyError('Enter a code'); return; }
+                try {
+                  const res = await fetch('/api/security/2fa/verify', {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code }),
+                  });
+                  const data = await res.json().catch(() => ({}));
+                  if (res.ok && data.ok) {
+                    setShow2FAGate(false);
+                    setTwoFaVerified(true);
+                    setTwoFaCode('');
+                    setTwoFaVerifyError('');
+                    addNotification('Verified', 'You are signed in.', 'success');
+                  } else {
+                    setTwoFaVerifyError(data.error || 'Invalid code');
+                  }
+                } catch {
+                  setTwoFaVerifyError('Request failed');
+                }
+              }}
+              className="w-full py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700"
+            >
+              Verify
+            </button>
+            <p className="mt-4 text-center">
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await fetch('/api/security/2fa/disable', { method: 'POST', credentials: 'include' });
+                    setShow2FAGate(false);
+                    setTwoFaEnabled(false);
+                    setTwoFaVerified(false);
+                    setTwoFaCode('');
+                    setTwoFaVerifyError('');
+                    addNotification('2FA disabled', 'You can turn it on again in Security settings.', 'success');
+                  } catch {
+                    addNotification('Error', 'Could not disable 2FA.', 'error');
+                  }
+                }}
+                className="text-sm text-slate-500 hover:text-slate-700 underline"
+              >
+                Don’t have a code? Turn off 2-Step Verification
+              </button>
+            </p>
+          </div>
+        </div>,
+        document.body
+      )}
+      <div className="flex h-full bg-slate-50 text-slate-700">
       <div className="w-64 border-r border-slate-200 bg-white p-4 space-y-6 shrink-0 overflow-y-auto">
         {menuGroups.map((group, idx) => (
           <div key={idx} className="space-y-1">
-            <h2 className="text-[10px] font-bold text-slate-400 uppercase px-3 tracking-widest mb-1">{group.title}</h2>
-            {group.items.map((item) => (
-              <button
-                key={item.id}
-                onClick={() => setActiveTab(item.id as TabID)}
-                className={`w-full flex items-center gap-3 px-4 py-2 rounded-xl transition-all font-medium text-sm ${
-                  activeTab === item.id 
-                    ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30' 
-                    : 'text-slate-600 hover:bg-slate-100'
-                }`}
-              >
-                <item.icon size={18} /> {item.label}
-              </button>
-            ))}
+            <h2 className="text-[10px] font-bold text-slate-400 uppercase px-3 tracking-widest mb-1">{t(group.titleKey, language)}</h2>
+            {group.items.map((item) => {
+              const isModalItem = 'openModal' in item && item.openModal;
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => isModalItem ? setShowLoginSettingsModal(true) : setActiveTab(item.id as TabID)}
+                  className={`w-full flex items-center gap-3 px-4 py-2 rounded-xl transition-all font-medium text-sm ${
+                    (!isModalItem && activeTab === item.id) || (isModalItem && showLoginSettingsModal)
+                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30'
+                      : 'text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  <item.icon size={18} /> {t(item.labelKey, language)}
+                </button>
+              );
+            })}
           </div>
         ))}
       </div>
 
-      <div className="flex-1 overflow-auto p-8 bg-[#f8fafc]" key={activeTab}>
+      <div className="flex-1 overflow-auto p-8 bg-[#f8fafc] min-h-0">
         {renderContent()}
       </div>
+      {showLoginSettingsModal && (
+        <LoginSettingsModal onClose={() => setShowLoginSettingsModal(false)} />
+      )}
     </div>
+    </>
   );
 };
 

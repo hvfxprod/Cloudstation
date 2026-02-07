@@ -10,17 +10,23 @@ import crypto from 'crypto';
 import os from 'os';
 import checkDiskSpace from 'check-disk-space';
 import Docker from 'dockerode';
+import session from 'express-session';
+import speakeasy from 'speakeasy';
+import QRCode from 'qrcode';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 9000;
 
 const DATA_PATH = process.env.DATA_PATH || path.join(__dirname, 'data');
+const SECURITY_FILE = path.join(DATA_PATH, 'security.json');
 const SHARES_FILE = process.env.SHARES_FILE || path.join(__dirname, 'shares.json');
 const SFTP_USERS_FILE = process.env.SFTP_USERS_FILE || path.join(DATA_PATH, '.sftp_users.json');
 const SFTP_CONTAINER_NAME = process.env.SFTP_CONTAINER_NAME || 'cloudstation-sftp';
 const SFTP_HOST_MOUNT_ROOT = process.env.SFTP_HOST_MOUNT_ROOT || DATA_PATH;
 const GEMINI_KEY_FILE = process.env.GEMINI_KEY_FILE || path.join(__dirname, '.gemini_key.enc');
+const GENERAL_FILE = path.join(DATA_PATH, 'general.json');
+const TRUENAS_KEY_FILE = path.join(DATA_PATH, '.truenas_key.enc');
 const ENCRYPTION_SECRET = process.env.ENCRYPTION_SECRET || 'cloudstation-gemini-key-secret-change-in-production';
 const NETDATA_URL = (process.env.NETDATA_URL || '').replace(/\/$/, '');
 const TRUENAS_URL = (process.env.TRUENAS_URL || '').replace(/\/$/, '');
@@ -105,6 +111,58 @@ async function writeGeminiKeyEncrypted(plainKey) {
   await fs.writeFile(GEMINI_KEY_FILE, enc, 'utf8');
 }
 
+async function readGeneralConfig() {
+  try {
+    const raw = await fs.readFile(GENERAL_FILE, 'utf8');
+    const data = JSON.parse(raw);
+    return typeof data === 'object' && data !== null ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+async function writeGeneralConfig(obj) {
+  await fs.mkdir(path.dirname(GENERAL_FILE), { recursive: true }).catch(() => {});
+  await fs.writeFile(GENERAL_FILE, JSON.stringify(obj, null, 2), 'utf8');
+}
+
+async function readTrueNASKeyEncrypted() {
+  try {
+    const raw = await fs.readFile(TRUENAS_KEY_FILE, 'utf8');
+    return raw.trim();
+  } catch {
+    return null;
+  }
+}
+
+async function getTrueNASKeyDecrypted() {
+  const blob = await readTrueNASKeyEncrypted();
+  if (!blob) return null;
+  try {
+    return decryptKey(blob);
+  } catch {
+    return null;
+  }
+}
+
+async function writeTrueNASKeyEncrypted(plainKey) {
+  if (!plainKey || !String(plainKey).trim()) {
+    await fs.unlink(TRUENAS_KEY_FILE).catch(() => {});
+    return;
+  }
+  const enc = encryptKey(String(plainKey).trim());
+  await fs.mkdir(path.dirname(TRUENAS_KEY_FILE), { recursive: true }).catch(() => {});
+  await fs.writeFile(TRUENAS_KEY_FILE, enc, 'utf8');
+}
+
+/** TrueNAS URL + API key: general.json + file first, then env */
+async function getTrueNASConfig() {
+  const general = await readGeneralConfig();
+  const url = (general.truenasUrl || '').toString().replace(/\/$/, '') || TRUENAS_URL;
+  const key = (url && (await getTrueNASKeyDecrypted())) || (url === TRUENAS_URL ? TRUENAS_API_KEY : '') || '';
+  return { url, key };
+}
+
 function resolveSafe(relativePath) {
   const normalized = path.normalize(relativePath || '').replace(/^(\.\.(\/|\\|$))+/, '');
   const full = path.resolve(DATA_PATH, normalized);
@@ -157,6 +215,142 @@ async function writeSftpStore(state) {
   await fs.writeFile(SFTP_USERS_FILE, JSON.stringify(doc, null, 2), 'utf8');
 }
 
+// ---------- Security (Firewall + 2FA + Login) ----------
+const defaultSecurity = {
+  firewall: { enabled: false, rules: [] },
+  twoFa: { enabled: false, secretEncrypted: null },
+  auth: { enabled: false, passwordHash: null, salt: null },
+};
+
+let securityConfigCache = null;
+let securityConfigCacheTs = 0;
+const SECURITY_CACHE_MS = 5000;
+
+async function loadSecurityConfig() {
+  if (securityConfigCache && Date.now() - securityConfigCacheTs < SECURITY_CACHE_MS) {
+    return securityConfigCache;
+  }
+  try {
+    const raw = await fs.readFile(SECURITY_FILE, 'utf8');
+    const data = JSON.parse(raw);
+    // 2FA is only "enabled" when we have a secret (avoid lockout if enabled but never set up)
+    const hasSecret = Boolean(data.twoFa?.secretEncrypted);
+    securityConfigCache = {
+      firewall: {
+        enabled: Boolean(data.firewall?.enabled),
+        rules: Array.isArray(data.firewall?.rules) ? data.firewall.rules : [],
+      },
+      twoFa: {
+        enabled: Boolean(data.twoFa?.enabled && hasSecret),
+        secretEncrypted: data.twoFa?.secretEncrypted ?? null,
+      },
+      auth: {
+        enabled: Boolean(data.auth?.enabled),
+        passwordHash: data.auth?.passwordHash ?? null,
+        salt: data.auth?.salt ?? null,
+      },
+    };
+  } catch {
+    securityConfigCache = { ...defaultSecurity };
+  }
+  securityConfigCacheTs = Date.now();
+  return securityConfigCache;
+}
+
+async function saveSecurityConfig(config) {
+  await fs.mkdir(path.dirname(SECURITY_FILE), { recursive: true }).catch(() => {});
+  await fs.writeFile(SECURITY_FILE, JSON.stringify(config, null, 2), 'utf8');
+  securityConfigCache = config;
+  securityConfigCacheTs = Date.now();
+}
+
+function getClientIp(req) {
+  const xff = req.headers['x-forwarded-for'];
+  if (typeof xff === 'string') {
+    const first = xff.split(',')[0].trim();
+    if (first) return first;
+  }
+  return req.socket?.remoteAddress ?? req.ip ?? '127.0.0.1';
+}
+
+function ipToBits(ip) {
+  const parts = ip.split('.').map(Number);
+  if (parts.length === 4 && parts.every(Number.isFinite)) {
+    return (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
+  }
+  return null;
+}
+
+function ipMatchRule(clientIp, rule) {
+  const value = (rule.value || rule.ip || '').trim();
+  if (!value) return false;
+  if (value.includes('/')) {
+    const [cidrIp, prefixStr] = value.split('/');
+    const prefix = parseInt(prefixStr, 10);
+    if (!Number.isFinite(prefix) || prefix < 0 || prefix > 32) return false;
+    const clientBits = ipToBits(clientIp);
+    const cidrBits = ipToBits(cidrIp);
+    if (clientBits == null || cidrBits == null) return false;
+    const mask = prefix === 0 ? 0 : ~((1 << (32 - prefix)) - 1) >>> 0;
+    return (clientBits & mask) === (cidrBits & mask);
+  }
+  return clientIp === value;
+}
+
+async function firewallMiddleware(req, res, next) {
+  const config = await loadSecurityConfig();
+  if (!config.firewall?.enabled || !config.firewall.rules?.length) return next();
+  const clientIp = getClientIp(req);
+  for (const rule of config.firewall.rules) {
+    if (rule.type === 'block' && ipMatchRule(clientIp, rule)) {
+      return res.status(403).json({ error: 'Access denied by firewall' });
+    }
+  }
+  const hasAllow = config.firewall.rules.some((r) => r.type === 'allow');
+  if (hasAllow) {
+    const allowed = config.firewall.rules.some((r) => r.type === 'allow' && ipMatchRule(clientIp, r));
+    if (!allowed) return res.status(403).json({ error: 'Access denied by firewall' });
+  }
+  next();
+}
+
+async function require2FAMiddleware(req, res, next) {
+  const config = await loadSecurityConfig();
+  if (!config.twoFa?.enabled) return next();
+  if (req.session?.twoFaVerified) return next();
+  const path = (req.path || '').toLowerCase();
+  if (path === '/api/security/2fa/status' || path === '/api/security/2fa/verify' || path === '/api/security/2fa/setup') return next();
+  return res.status(401).json({ error: '2FA required', code: '2FA_REQUIRED' });
+}
+
+const AUTH_SALT_LEN = 16;
+const AUTH_KEY_LEN = 64;
+function hashPassword(password, salt) {
+  const s = Buffer.isBuffer(salt) ? salt : (salt ? Buffer.from(salt, 'base64') : crypto.randomBytes(AUTH_SALT_LEN));
+  const h = crypto.scryptSync(String(password), s, AUTH_KEY_LEN);
+  return { hash: h.toString('base64'), salt: s.toString('base64') };
+}
+function verifyPassword(password, saltB64, hashB64) {
+  if (!saltB64 || !hashB64) return false;
+  try {
+    const salt = Buffer.from(saltB64, 'base64');
+    const expected = Buffer.from(hashB64, 'base64');
+    const actual = crypto.scryptSync(String(password), salt, AUTH_KEY_LEN);
+    return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+  } catch {
+    return false;
+  }
+}
+
+async function requireAuthMiddleware(req, res, next) {
+  const config = await loadSecurityConfig();
+  if (!config.auth?.enabled) return next();
+  if (req.session?.user) return next();
+  const p = (req.path || req.url || '').split('?')[0];
+  if (/^\/auth\//.test(p.replace(/^\/api/, ''))) return next();
+  return res.status(401).json({ error: 'Login required', code: 'LOGIN_REQUIRED' });
+}
+
 function getDocker() {
   try {
     return new Docker({ socketPath: '/var/run/docker.sock' });
@@ -180,10 +374,12 @@ async function createAndStartSftp(users, port) {
   await removeSftpContainer(docker);
   const enabled = users.filter((u) => u.enabled !== false);
   if (enabled.length === 0) return;
+  const general = await readGeneralConfig();
+  const mountRoot = (general.mountPath && String(general.mountPath).trim()) || SFTP_HOST_MOUNT_ROOT;
   const commandLines = enabled.map((u) => `${u.name}:${u.password || ''}:::data`);
   const binds = enabled.map((u) => {
     const m = (u.mount || '').trim();
-    const hostPath = m.startsWith('/') ? m : path.join(SFTP_HOST_MOUNT_ROOT, m).replace(/\\/g, '/');
+    const hostPath = m.startsWith('/') ? m : path.join(mountRoot, m).replace(/\\/g, '/');
     return `${hostPath}:/home/${u.name}/data:rw`;
   });
   await docker.createContainer({
@@ -200,11 +396,117 @@ async function createAndStartSftp(users, port) {
   await c.start();
 }
 
-app.use(cors());
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
+
+app.use(
+  session({
+    secret: ENCRYPTION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    cookie: { httpOnly: true, maxAge: 7 * 24 * 60 * 60 * 1000, sameSite: 'lax' },
+  })
+);
+app.use(firewallMiddleware);
 
 // 정적 파일 (Vite 빌드 결과)
 app.use(express.static(path.join(__dirname, '..', 'dist'), { index: 'index.html' }));
+
+// 2FA required for /api except security endpoints
+app.use('/api', (req, res, next) => {
+  const p = (req.path || req.url || '').split('?')[0];
+  if (/\/security\/2fa\/(status|verify|setup|disable)$/.test(p)) return next();
+  if (req.method === 'GET' && /\/security\/firewall$/.test(p)) return next();
+  return require2FAMiddleware(req, res, next);
+});
+
+// Login required for /api when auth is enabled (except auth endpoints)
+app.use('/api', (req, res, next) => {
+  const p = (req.path || req.url || '').split('?')[0];
+  if (/\/auth\//.test(p)) return next();
+  return requireAuthMiddleware(req, res, next);
+});
+
+// ---------- Auth (Login) ----------
+app.get('/api/auth/status', async (req, res) => {
+  try {
+    const config = await loadSecurityConfig();
+    const authEnabled = Boolean(config.auth?.enabled);
+    const loggedIn = authEnabled ? Boolean(req.session?.user) : true;
+    res.json({ loggedIn, authEnabled, passwordSet: Boolean(config.auth?.passwordHash) });
+  } catch (err) {
+    res.status(500).json({ error: err.message, loggedIn: false, authEnabled: false });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const config = await loadSecurityConfig();
+    if (!config.auth?.enabled) return res.status(400).json({ error: 'Login is not enabled' });
+    const { username, password } = req.body || {};
+    if (!password || String(password).length < 1) return res.status(400).json({ error: 'Password required' });
+    const allowedUser = 'admin';
+    if (username !== undefined && username !== null && String(username).trim() !== '' && String(username).trim().toLowerCase() !== allowedUser) {
+      return res.status(401).json({ error: 'Invalid username or password' });
+    }
+    if (!verifyPassword(password, config.auth.salt, config.auth.passwordHash)) {
+      return res.status(401).json({ error: 'Invalid username or password' });
+    }
+    req.session.user = allowedUser;
+    res.json({ ok: true, user: allowedUser });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  req.session.destroy((err) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.clearCookie('connect.sid');
+    res.json({ ok: true });
+  });
+});
+
+app.post('/api/auth/setup', async (req, res) => {
+  try {
+    const config = await loadSecurityConfig();
+    const { newPassword } = req.body || {};
+    if (!newPassword || String(newPassword).length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+    const alreadyLoggedIn = Boolean(req.session?.user);
+    const authCurrentlyEnabled = Boolean(config.auth?.enabled);
+    if (authCurrentlyEnabled && !alreadyLoggedIn) {
+      return res.status(403).json({ error: 'Must be logged in to change password' });
+    }
+    const { hash, salt } = hashPassword(newPassword, null);
+    config.auth = config.auth || {};
+    config.auth.passwordHash = hash;
+    config.auth.salt = salt;
+    if (!authCurrentlyEnabled) config.auth.enabled = true;
+    await saveSecurityConfig(config);
+    if (!alreadyLoggedIn) req.session.user = 'admin';
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/auth/config', async (req, res) => {
+  try {
+    const config = await loadSecurityConfig();
+    if (!req.session?.user) return res.status(401).json({ error: 'Login required' });
+    const { enabled } = req.body || {};
+    if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be boolean' });
+    config.auth = config.auth || {};
+    config.auth.enabled = enabled;
+    if (!enabled) { config.auth.passwordHash = null; config.auth.salt = null; }
+    await saveSecurityConfig(config);
+    res.json({ ok: true, enabled });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // 디렉터리 목록
 app.get('/api/fs', async (req, res) => {
@@ -481,6 +783,72 @@ async function getNetworkStatsFromNetdata() {
   return Object.keys(byInterface).length ? { byInterface, source: 'netdata' } : null;
 }
 
+/** TrueNAS API로 호스트 네트워크 설정(호스트명, DNS, 인터페이스) 가져오기 */
+async function getTrueNASNetworkInfo() {
+  const { url, key } = await getTrueNASConfig();
+  if (!url || !key) return null;
+  const opts = { method: 'GET', headers: TRUENAS_HEADERS(url, key), signal: AbortSignal.timeout(10000) };
+  try {
+    const [configRes, ifaceRes] = await Promise.all([
+      fetch(`${url}/api/v2.0/network/configuration`, opts),
+      fetch(`${url}/api/v2.0/interface`, opts),
+    ]);
+    if (!configRes.ok || !ifaceRes.ok) return null;
+    const config = await configRes.json();
+    const ifaces = await ifaceRes.json();
+    const hostname =
+      [config.hostname, config.domain].filter(Boolean).join('.') ||
+      config.hostname ||
+      config.hostname_local ||
+      'TrueNAS';
+    let dns = [config.nameserver1, config.nameserver2, config.nameserver3].filter(Boolean);
+    if (dns.length === 0 && Array.isArray(config.nameservers)) dns = config.nameservers.filter(Boolean);
+    const interfaces = [];
+    const list = Array.isArray(ifaces) ? ifaces : ifaces?.data ?? [];
+    for (const iface of list) {
+      const name = iface.name ?? iface.id ?? iface.type ?? 'unknown';
+      const addrs = iface.state?.addresses ?? iface.ipv4_addresses ?? iface.addresses ?? [];
+      const arr = Array.isArray(addrs) ? addrs : [];
+      for (const a of arr) {
+        const address = typeof a === 'string' ? a : (a.address ?? a.addr ?? a);
+        if (address && (typeof a !== 'object' || (a.type !== 'inet6' && !String(address).includes(':')))) {
+          interfaces.push({ name, address: String(address).split('/')[0], family: 'IPv4', mac: iface.physical_address ?? iface.mac ?? null });
+          break;
+        }
+      }
+      if (interfaces.filter((i) => i.name === name).length === 0) {
+        const addr = iface.address ?? iface.ipv4_address ?? (Array.isArray(iface.ipv4_addresses) ? iface.ipv4_addresses[0] : null);
+        if (addr) {
+          const str = typeof addr === 'object' ? (addr.address ?? addr.addr ?? addr) : addr;
+          if (str) interfaces.push({ name, address: String(str).split('/')[0], family: 'IPv4', mac: iface.physical_address ?? iface.mac ?? null });
+        }
+      }
+    }
+    return { hostname: hostname || 'TrueNAS', interfaces, dns, source: 'truenas' };
+  } catch {
+    return null;
+  }
+}
+
+/** Well-known port → service name (for "This Container" LISTEN list) */
+const PORT_SERVICE_NAMES = {
+  22: 'SSH',
+  80: 'HTTP',
+  81: 'Nginx Admin',
+  443: 'HTTPS',
+  1080: 'Kitsu',
+  3000: 'Fenrus',
+  3306: 'MySQL',
+  5432: 'PostgreSQL',
+  8065: 'Mattermost',
+  8088: 'SFTP Panel',
+  9000: 'PHP-FPM',
+  9999: 'CloudStation',
+  19999: 'Netdata',
+  31015: 'Portainer',
+  30020: 'Nginx Proxy Manager',
+};
+
 /** Linux: /proc/net/tcp, tcp6에서 LISTEN 상태 포트 번호 목록 반환 (중복 제거, 정렬) */
 function getListeningPorts() {
   if (process.platform !== 'linux') return [];
@@ -509,6 +877,15 @@ function getListeningPorts() {
   } catch (e) {
     return [];
   }
+}
+
+/** LISTEN 포트 목록에 서비스 이름을 붙여 반환. [{ port, name }, ...] */
+function getListeningPortsWithNames() {
+  const ports = getListeningPorts();
+  return ports.map((port) => ({
+    port,
+    name: PORT_SERVICE_NAMES[port] ?? 'Internal',
+  }));
 }
 
 /** Linux: lsblk로 물리 디스크 정보 (모델, 용량, 타입) 반환. 실패 시 빈 배열 */
@@ -609,10 +986,99 @@ app.get('/api/logs', (req, res) => {
   }
 });
 
+// ---------- Security API ----------
+app.get('/api/security/firewall', async (req, res) => {
+  try {
+    const config = await loadSecurityConfig();
+    res.json({
+      enabled: config.firewall.enabled,
+      rules: config.firewall.rules,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/security/firewall', async (req, res) => {
+  try {
+    const config = await loadSecurityConfig();
+    const { enabled, rules } = req.body || {};
+    if (typeof enabled === 'boolean') config.firewall.enabled = enabled;
+    if (Array.isArray(rules)) {
+      config.firewall.rules = rules
+        .filter((r) => r && (r.type === 'allow' || r.type === 'block') && (r.value || r.ip))
+        .map((r) => ({ type: r.type, value: (r.value || r.ip || '').trim() }));
+    }
+    await saveSecurityConfig(config);
+    res.json({ enabled: config.firewall.enabled, rules: config.firewall.rules });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/security/2fa/status', async (req, res) => {
+  try {
+    const config = await loadSecurityConfig();
+    const hasSecret = Boolean(config.twoFa?.secretEncrypted);
+    const enabled = Boolean(config.twoFa?.enabled && hasSecret);
+    res.json({
+      enabled,
+      verified: Boolean(req.session?.twoFaVerified),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message, enabled: false, verified: false });
+  }
+});
+
+app.post('/api/security/2fa/setup', async (req, res) => {
+  try {
+    const config = await loadSecurityConfig();
+    const secret = speakeasy.generateSecret({ name: 'CloudStation Pro', length: 20 });
+    config.twoFa.secretEncrypted = encryptKey(secret.base32);
+    config.twoFa.enabled = true;
+    await saveSecurityConfig(config);
+    const otpauth = secret.otpauth_url;
+    const qrDataUrl = otpauth ? await QRCode.toDataURL(otpauth, { width: 200, margin: 1 }) : null;
+    res.json({ secret: secret.base32, qrDataUrl });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/security/2fa/verify', async (req, res) => {
+  try {
+    const { code } = req.body || {};
+    const config = await loadSecurityConfig();
+    if (!config.twoFa.enabled || !config.twoFa.secretEncrypted) {
+      return res.status(400).json({ error: '2FA not enabled' });
+    }
+    const secret = decryptKey(config.twoFa.secretEncrypted);
+    const valid = speakeasy.totp.verify({ secret, encoding: 'base32', token: String(code || '').trim(), window: 1 });
+    if (!valid) return res.status(401).json({ error: 'Invalid code' });
+    req.session.twoFaVerified = true;
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/security/2fa/disable', async (req, res) => {
+  try {
+    const config = await loadSecurityConfig();
+    config.twoFa.enabled = false;
+    config.twoFa.secretEncrypted = null;
+    await saveSecurityConfig(config);
+    if (req.session) req.session.twoFaVerified = false;
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/ports', async (req, res) => {
   try {
     const [container, docker, truenas] = await Promise.all([
-      Promise.resolve(getListeningPorts()),
+      Promise.resolve(getListeningPortsWithNames()),
       getDockerPorts(),
       getTrueNASPorts(),
     ]);
@@ -647,12 +1113,13 @@ function parsePoolTopology(topology) {
 
 /** TrueNAS REST API로 스토리지 풀 목록·상세(토폴로지) 조회 */
 async function getTrueNASPoolStatus() {
-  if (!TRUENAS_URL || !TRUENAS_API_KEY) return [];
-  const url = `${TRUENAS_URL}/api/v2.0/pool`;
+  const { url: baseUrl, key } = await getTrueNASConfig();
+  if (!baseUrl || !key) return [];
+  const url = `${baseUrl}/api/v2.0/pool`;
   try {
     const res = await fetch(url, {
       method: 'GET',
-      headers: TRUENAS_HEADERS(TRUENAS_URL, TRUENAS_API_KEY),
+      headers: TRUENAS_HEADERS(baseUrl, key),
       signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) return [];
@@ -670,9 +1137,9 @@ async function getTrueNASPoolStatus() {
       pools.map(async (p) => {
         if ((p.topology?.length ?? 0) > 0) return p;
         try {
-          const r = await fetch(`${TRUENAS_URL}/api/v2.0/pool/${p.id}`, {
+          const r = await fetch(`${baseUrl}/api/v2.0/pool/${p.id}`, {
             method: 'GET',
-            headers: TRUENAS_HEADERS(TRUENAS_URL, TRUENAS_API_KEY),
+            headers: TRUENAS_HEADERS(baseUrl, key),
             signal: AbortSignal.timeout(5000),
           });
           if (!r.ok) return p;
@@ -693,12 +1160,13 @@ async function getTrueNASPoolStatus() {
 
 /** TrueNAS REST API로 디스크 목록 조회 (이름, 용량, 모델 등) */
 async function getTrueNASDisks() {
-  if (!TRUENAS_URL || !TRUENAS_API_KEY) return [];
-  const url = `${TRUENAS_URL}/api/v2.0/disk`;
+  const { url: baseUrl, key } = await getTrueNASConfig();
+  if (!baseUrl || !key) return [];
+  const url = `${baseUrl}/api/v2.0/disk`;
   try {
     const res = await fetch(url, {
       method: 'GET',
-      headers: TRUENAS_HEADERS(TRUENAS_URL, TRUENAS_API_KEY),
+      headers: TRUENAS_HEADERS(baseUrl, key),
       signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) return [];
@@ -720,12 +1188,13 @@ async function getTrueNASDisks() {
 
 /** TrueNAS 시스템에서 사용 중인 포트 (서비스별). SSH, 앱 사용 포트 등 */
 async function getTrueNASPorts() {
-  if (!TRUENAS_URL || !TRUENAS_API_KEY) return [];
+  const { url: baseUrl, key } = await getTrueNASConfig();
+  if (!baseUrl || !key) return [];
   const entries = [];
-  const opts = { method: 'GET', headers: TRUENAS_HEADERS(TRUENAS_URL, TRUENAS_API_KEY), signal: AbortSignal.timeout(8000) };
+  const opts = { method: 'GET', headers: TRUENAS_HEADERS(baseUrl, key), signal: AbortSignal.timeout(8000) };
 
   try {
-    const sshRes = await fetch(`${TRUENAS_URL}/api/v2.0/ssh`, opts);
+    const sshRes = await fetch(`${baseUrl}/api/v2.0/ssh`, opts);
     if (sshRes.ok) {
       const sshData = await sshRes.json();
       const cfg = Array.isArray(sshData) ? sshData[0] : sshData;
@@ -737,7 +1206,7 @@ async function getTrueNASPorts() {
   } catch (_) {}
 
   try {
-    const appRes = await fetch(`${TRUENAS_URL}/api/v2.0/app/used_ports`, opts);
+    const appRes = await fetch(`${baseUrl}/api/v2.0/app/used_ports`, opts);
     if (appRes.ok) {
       const appData = await appRes.json();
       if (typeof appData === 'object' && appData !== null && !Array.isArray(appData)) {
@@ -838,33 +1307,36 @@ app.get('/api/raid', async (req, res) => {
   }
 });
 
-// ---------- 네트워크 정보 (서버 기준) ----------
+// ---------- 네트워크 정보 (TrueNAS 우선, 없으면 컨테이너 기준) ----------
 app.get('/api/network', async (req, res) => {
   try {
-    const hostname = os.hostname();
-    const ifaces = os.networkInterfaces() || {};
-    const interfaces = [];
-    for (const [name, addrs] of Object.entries(ifaces)) {
-      if (!Array.isArray(addrs)) continue;
-      for (const a of addrs) {
-        if (a.family === 'IPv4' && !a.internal) {
-          interfaces.push({ name, address: a.address, family: a.family, mac: a.mac || null });
+    let payload = await getTrueNASNetworkInfo();
+    if (!payload) {
+      const hostname = os.hostname();
+      const ifaces = os.networkInterfaces() || {};
+      const interfaces = [];
+      for (const [name, addrs] of Object.entries(ifaces)) {
+        if (!Array.isArray(addrs)) continue;
+        for (const a of addrs) {
+          if (a.family === 'IPv4' && !a.internal) {
+            interfaces.push({ name, address: a.address, family: a.family, mac: a.mac || null });
+          }
         }
       }
-    }
-    let dns = [];
-    try {
-      const resolv = await fs.readFile('/etc/resolv.conf', 'utf8');
-      const lines = resolv.split('\n');
-      for (const line of lines) {
-        const m = line.trim().match(/^nameserver\s+(\S+)/i);
-        if (m) dns.push(m[1]);
+      let dns = [];
+      try {
+        const resolv = await fs.readFile('/etc/resolv.conf', 'utf8');
+        const lines = resolv.split('\n');
+        for (const line of lines) {
+          const m = line.trim().match(/^nameserver\s+(\S+)/i);
+          if (m) dns.push(m[1]);
+        }
+      } catch {
+        // Windows or no resolv.conf
       }
-    } catch {
-      // Windows or no resolv.conf
+      payload = { hostname, interfaces, dns, source: 'container' };
     }
     const networkStats = await getNetworkStatsFromNetdata();
-    const payload = { hostname, interfaces, dns };
     if (networkStats) payload.networkStats = networkStats;
     res.json(payload);
   } catch (err) {
@@ -889,6 +1361,44 @@ app.post('/api/settings/gemini-key', async (req, res) => {
     const { key } = req.body || {};
     if (key == null) return res.status(400).json({ error: 'key required' });
     await writeGeminiKeyEncrypted(String(key).trim());
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------- General settings (language, timezone, TrueNAS, mount path) ----------
+app.get('/api/settings/general', async (req, res) => {
+  try {
+    const general = await readGeneralConfig();
+    const truenasApiKeySet = !!(await getTrueNASKeyDecrypted());
+    res.json({
+      language: general.language ?? 'en',
+      timezone: general.timezone ?? 'UTC',
+      truenasUrl: general.truenasUrl ?? '',
+      truenasApiKeySet,
+      mountPath: general.mountPath ?? '',
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/settings/general', async (req, res) => {
+  try {
+    const general = await readGeneralConfig();
+    const { language, timezone, truenasUrl, truenasApiKey, mountPath } = req.body || {};
+    if (language !== undefined) general.language = String(language || 'en').slice(0, 16);
+    if (timezone !== undefined) general.timezone = String(timezone || 'UTC').trim().slice(0, 128);
+    if (truenasUrl !== undefined) general.truenasUrl = String(truenasUrl || '').replace(/\/$/, '').trim().slice(0, 512);
+    if (truenasApiKey !== undefined) {
+      const v = String(truenasApiKey || '').trim();
+      await writeTrueNASKeyEncrypted(v || null);
+    }
+    if (mountPath !== undefined) general.mountPath = String(mountPath || '').trim().slice(0, 1024);
+    await writeGeneralConfig(general);
     res.json({ ok: true });
   } catch (err) {
     console.error(err);

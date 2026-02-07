@@ -1,13 +1,15 @@
 
-import React from 'react';
+import React, { useState } from 'react';
 import { 
-  FolderOpen, Share2, Cpu, Bot, Search, LogOut, Power, User
+  FolderOpen, Share2, Cpu, Bot, Search, LogOut, Power, User, Lock
 } from 'lucide-react';
 import { useOSStore } from '../store';
 import { AppID } from '../types';
+import LoginSettingsModal from './LoginSettingsModal';
 
 const StartMenu: React.FC = () => {
   const { isStartMenuOpen, toggleStartMenu, openWindow } = useOSStore();
+  const [showLoginSettings, setShowLoginSettings] = useState(false);
 
   if (!isStartMenuOpen) return null;
 
@@ -48,7 +50,27 @@ const StartMenu: React.FC = () => {
                 autoFocus
               />
             </div>
-            <button className="p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors text-white" title="Lock">
+            <button
+              type="button"
+              className="p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors text-white"
+              title="Require login"
+              onClick={() => setShowLoginSettings(true)}
+            >
+              <Lock size={20} />
+            </button>
+            <button
+              type="button"
+              className="p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-colors text-white"
+              title="Log out"
+              onClick={async () => {
+                try {
+                  await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+                  window.location.reload();
+                } catch {
+                  window.location.reload();
+                }
+              }}
+            >
               <LogOut size={20} />
             </button>
             <button className="p-3 bg-red-500/20 hover:bg-red-500/40 rounded-xl transition-colors text-red-500" title="Shut Down">
@@ -77,6 +99,9 @@ const StartMenu: React.FC = () => {
         <div className="absolute -bottom-24 -right-24 w-96 h-96 bg-blue-500/20 blur-[100px] rounded-full pointer-events-none" />
         <div className="absolute -top-24 -left-24 w-96 h-96 bg-purple-500/20 blur-[100px] rounded-full pointer-events-none" />
       </div>
+      {showLoginSettings && (
+        <LoginSettingsModal onClose={() => setShowLoginSettings(false)} />
+      )}
     </div>
   );
 };

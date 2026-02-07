@@ -45,10 +45,14 @@ interface OSState extends CustomizationState {
   sharedLinks: SharedLink[];
   notifications: Notification[];
   isStartMenuOpen: boolean;
+  timezone: string;
+  language: string;
 
   setTheme: (theme: ThemeMode) => void;
   setBackground: (background: BackgroundPreset) => void;
   setBackgroundCustomUrl: (url: string) => void;
+  setTimezone: (tz: string) => void;
+  setLanguage: (lang: string) => void;
   toggleStartMenu: () => void;
   openWindow: (id: AppID, title: string) => void;
   closeWindow: (id: AppID) => void;
@@ -80,6 +84,8 @@ export const useOSStore = create<OSState>((set, get) => ({
   files: [],
   sharedLinks: [],
   notifications: [],
+  timezone: 'UTC',
+  language: 'en',
 
   setTheme: (theme) => {
     set({ theme });
@@ -96,6 +102,8 @@ export const useOSStore = create<OSState>((set, get) => ({
     const s = get();
     saveCustomization({ theme: s.theme, background: s.background, backgroundCustomUrl: url });
   },
+  setTimezone: (tz) => set({ timezone: typeof tz === 'string' && tz.trim() ? tz.trim() : 'UTC' }),
+  setLanguage: (lang) => set({ language: (lang === 'ko' || lang === 'en') ? lang : 'en' }),
   toggleStartMenu: () => set((state) => ({ isStartMenuOpen: !state.isStartMenuOpen })),
 
   openWindow: (id, title) => set((state) => {

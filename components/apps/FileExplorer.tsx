@@ -59,7 +59,7 @@ const FileExplorer: React.FC = () => {
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // My Drive (API) — 서버 마운트 경로 연동
+  // My Drive (API) — server mount path
   const [drivePath, setDrivePath] = useState('');
   const [driveItems, setDriveItems] = useState<FsItem[]>([]);
   const [driveLoading, setDriveLoading] = useState(false);
@@ -153,12 +153,12 @@ const FileExplorer: React.FC = () => {
       const full = shareFullUrl(url);
       const copied = await safeCopyToClipboard(full);
       if (copied) {
-        addNotification('공유 링크 생성', '링크가 클립보드에 복사되었습니다. Shared Links에서 관리할 수 있습니다.', 'success');
+        addNotification('Share link created', 'Link copied to clipboard. Manage in Shared Links.', 'success');
       } else {
-        addNotification('공유 링크 생성', `링크가 생성되었습니다.\n${full}`, 'info');
+        addNotification('Share link created', `Link created.\n${full}`, 'info');
       }
     } catch (e) {
-      addNotification('공유 실패', e instanceof Error ? e.message : 'Failed to create share', 'warning');
+      addNotification('Share failed', e instanceof Error ? e.message : 'Failed to create share', 'warning');
     } finally {
       setShareLoadingId(null);
     }

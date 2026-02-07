@@ -76,7 +76,7 @@ const Window: React.FC<WindowProps> = ({ windowState, children }) => {
         isActive ? 'ring-2 ring-blue-500/30' : 'opacity-95'
       } ${isFullscreen ? 'rounded-none' : ''}`}
     >
-      {/* Title Bar - 드래그로 창 이동 */}
+      {/* Title Bar - drag to move window */}
       <div
         onMouseDown={handleTitleMouseDown}
         className={`h-10 md:h-12 flex items-center justify-between px-4 md:px-6 select-none ${
