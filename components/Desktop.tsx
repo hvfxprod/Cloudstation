@@ -4,7 +4,8 @@ import {
   FolderOpen, 
   Share2, 
   Cpu,
-  Bot
+  Bot,
+  Calendar
 } from 'lucide-react';
 import { useOSStore } from '../store';
 import { AppID } from '../types';
@@ -40,6 +41,7 @@ const Desktop: React.FC = () => {
     { id: 'control-panel', label: 'Control Panel', icon: <Cpu />, color: 'bg-slate-700' },
     { id: 'shared-links', label: 'Shared Links', icon: <Share2 />, color: 'bg-emerald-500' },
     { id: 'ai-assistant', label: 'AI Assistant', icon: <Bot />, color: 'bg-purple-600' },
+    { id: 'calendar', label: 'Calendar', icon: <Calendar />, color: 'bg-amber-500' },
   ];
 
   return (

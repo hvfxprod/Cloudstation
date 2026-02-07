@@ -26,6 +26,7 @@ const SFTP_CONTAINER_NAME = process.env.SFTP_CONTAINER_NAME || 'cloudstation-sft
 const SFTP_HOST_MOUNT_ROOT = process.env.SFTP_HOST_MOUNT_ROOT || DATA_PATH;
 const GEMINI_KEY_FILE = process.env.GEMINI_KEY_FILE || path.join(__dirname, '.gemini_key.enc');
 const GENERAL_FILE = path.join(DATA_PATH, 'general.json');
+const CALENDAR_FILE = path.join(DATA_PATH, 'calendar.json');
 const TRUENAS_KEY_FILE = path.join(DATA_PATH, '.truenas_key.enc');
 const ENCRYPTION_SECRET = process.env.ENCRYPTION_SECRET || 'cloudstation-gemini-key-secret-change-in-production';
 const NETDATA_URL = (process.env.NETDATA_URL || '').replace(/\/$/, '');
@@ -1792,7 +1793,107 @@ function shareDownloadPage(error, data = {}) {
 </html>`;
 }
 
-// SPA 폴백
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+}
+
+// ---------- Calendar events ----------
+async function readCalendarEvents() {
+  try {
+    const raw = await fs.readFile(CALENDAR_FILE, 'utf8');
+    const data = JSON.parse(raw);
+    return Array.isArray(data.events) ? data.events : [];
+  } catch {
+    return [];
+  }
+}
+
+async function writeCalendarEvents(events) {
+  await fs.mkdir(path.dirname(CALENDAR_FILE), { recursive: true }).catch(() => {});
+  await fs.writeFile(CALENDAR_FILE, JSON.stringify({ events }, null, 2), 'utf8');
+}
+
+app.get('/api/calendar/events', async (req, res) => {
+  try {
+    const events = await readCalendarEvents();
+    const from = (req.query.from || '').toString();
+    const to = (req.query.to || '').toString();
+    let list = events;
+    if (from && to) {
+      list = events.filter((e) => e.date >= from && e.date <= to);
+    }
+    res.json({ events: list });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/calendar/events', async (req, res) => {
+  try {
+    const events = await readCalendarEvents();
+    const { title, date, startTime, endTime, color, description } = req.body || {};
+    if (!title || !date) return res.status(400).json({ error: 'title and date required' });
+    const id = `ev-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    const event = {
+      id,
+      title: String(title).trim().slice(0, 256),
+      date: String(date).trim().slice(0, 10),
+      startTime: startTime ? String(startTime).trim().slice(0, 16) : null,
+      endTime: endTime ? String(endTime).trim().slice(0, 16) : null,
+      color: color ? String(color).trim().slice(0, 32) : null,
+      description: description ? String(description).trim().slice(0, 1024) : null,
+    };
+    events.push(event);
+    await writeCalendarEvents(events);
+    res.json({ ok: true, event });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/calendar/events/:id', async (req, res) => {
+  try {
+    const events = await readCalendarEvents();
+    const id = (req.params.id || '').toString();
+    const idx = events.findIndex((e) => e.id === id);
+    if (idx === -1) return res.status(404).json({ error: 'Event not found' });
+    const { title, date, startTime, endTime, color, description } = req.body || {};
+    const ev = events[idx];
+    if (title !== undefined) ev.title = String(title).trim().slice(0, 256);
+    if (date !== undefined) ev.date = String(date).trim().slice(0, 10);
+    if (startTime !== undefined) ev.startTime = startTime ? String(startTime).trim().slice(0, 16) : null;
+    if (endTime !== undefined) ev.endTime = endTime ? String(endTime).trim().slice(0, 16) : null;
+    if (color !== undefined) ev.color = color ? String(color).trim().slice(0, 32) : null;
+    if (description !== undefined) ev.description = description ? String(description).trim().slice(0, 1024) : null;
+    await writeCalendarEvents(events);
+    res.json({ ok: true, event: ev });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/calendar/events/:id', async (req, res) => {
+  try {
+    const events = await readCalendarEvents();
+    const id = (req.params.id || '').toString();
+    const idx = events.findIndex((e) => e.id === id);
+    if (idx === -1) return res.status(404).json({ error: 'Event not found' });
+    events.splice(idx, 1);
+    await writeCalendarEvents(events);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// SPA fallback (must be after all API routes)
 app.get('*', (req, res) => {
   if (!req.path.startsWith('/api')) {
     res.sendFile(path.join(__dirname, '..', 'dist', 'index.html'));
@@ -1800,13 +1901,6 @@ app.get('*', (req, res) => {
     res.status(404).json({ error: 'Not found' });
   }
 });
-
-function formatSize(bytes) {
-  if (bytes < 1024) return bytes + ' B';
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-  return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
-}
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`CloudStation server at http://0.0.0.0:${PORT}, DATA_PATH=${DATA_PATH}`);

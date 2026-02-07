@@ -1139,7 +1139,7 @@ const ControlPanel: React.FC = () => {
                 />
                 <input
                   type="text"
-                  placeholder="Mount path (e.g. KJEFILM or /mnt/...)"
+                  placeholder="Mount path (e.g. TESTUSER or /mnt/...)"
                   value={sftpAddMount}
                   onChange={(e) => setSftpAddMount(e.target.value)}
                   className="px-3 py-2 border border-slate-200 rounded-lg text-sm flex-1 min-w-[180px]"

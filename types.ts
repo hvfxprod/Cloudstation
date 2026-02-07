@@ -1,5 +1,5 @@
 
-export type AppID = 'file-explorer' | 'control-panel' | 'ai-assistant' | 'shared-links';
+export type AppID = 'file-explorer' | 'control-panel' | 'ai-assistant' | 'shared-links' | 'calendar';
 
 export interface WindowState {
   id: AppID;

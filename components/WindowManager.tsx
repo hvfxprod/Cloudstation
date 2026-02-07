@@ -6,6 +6,7 @@ import FileExplorer from './apps/FileExplorer';
 import AISearch from './apps/AISearch';
 import SharedLinks from './apps/SharedLinks';
 import ControlPanel from './apps/ControlPanel';
+import Calendar from './apps/Calendar';
 import { Settings as SettingsIcon } from 'lucide-react';
 
 const WindowManager: React.FC = () => {
@@ -21,6 +22,8 @@ const WindowManager: React.FC = () => {
         return <SharedLinks />;
       case 'control-panel':
         return <ControlPanel />;
+      case 'calendar':
+        return <Calendar />;
       default:
         return (
           <div className="flex flex-col items-center justify-center h-full text-slate-400 p-10 text-center">
