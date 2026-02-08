@@ -8,7 +8,7 @@ const APP_ICONS: Record<AppID, { Icon: React.ComponentType<{ size?: number; clas
   'control-panel': { Icon: Cpu, color: 'bg-slate-700' },
   'shared-links': { Icon: Share2, color: 'bg-emerald-500' },
   'ai-assistant': { Icon: Bot, color: 'bg-purple-600' },
-  'calendar': { Icon: Calendar, color: 'bg-amber-500' },
+  'calendar': { Icon: Calendar, color: 'bg-red-500' },
 };
 
 const WidgetResources: React.FC = () => {

@@ -1,11 +1,14 @@
 
 import { create } from 'zustand';
-import { AppID, WindowState, FileItem, SharedLink, Notification } from './types';
+import { AppID, WindowState, FileItem, SharedLink, Notification, RecentItem, FavoriteDriveItem } from './types';
 
 export type ThemeMode = 'light' | 'dark' | 'dynamic';
 export type BackgroundPreset = string;
 
 const CUSTOMIZATION_KEY = 'cloudstation-customization';
+const FILES_KEY = 'cloudstation-files';
+const RECENT_KEY = 'cloudstation-recent';
+const FAVORITE_DRIVE_KEY = 'cloudstation-favorite-drive';
 
 interface CustomizationState {
   theme: ThemeMode;
@@ -38,10 +41,75 @@ function saveCustomization(s: CustomizationState) {
   }
 }
 
+function loadFiles(): FileItem[] {
+  try {
+    const raw = localStorage.getItem(FILES_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : [];
+    }
+  } catch {
+    // ignore
+  }
+  return [];
+}
+
+function saveFiles(files: FileItem[]) {
+  try {
+    localStorage.setItem(FILES_KEY, JSON.stringify(files));
+  } catch {
+    // ignore
+  }
+}
+
+function loadRecent(): RecentItem[] {
+  try {
+    const raw = localStorage.getItem(RECENT_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : [];
+    }
+  } catch {
+    // ignore
+  }
+  return [];
+}
+
+function saveRecent(items: RecentItem[]) {
+  try {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(items.slice(0, 100)));
+  } catch {
+    // ignore
+  }
+}
+
+function loadFavoriteDrive(): FavoriteDriveItem[] {
+  try {
+    const raw = localStorage.getItem(FAVORITE_DRIVE_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : [];
+    }
+  } catch {
+    // ignore
+  }
+  return [];
+}
+
+function saveFavoriteDrive(items: FavoriteDriveItem[]) {
+  try {
+    localStorage.setItem(FAVORITE_DRIVE_KEY, JSON.stringify(items));
+  } catch {
+    // ignore
+  }
+}
+
 interface OSState extends CustomizationState {
   windows: WindowState[];
   activeWindowId: AppID | null;
   files: FileItem[];
+  recentItems: RecentItem[];
+  favoriteDriveItems: FavoriteDriveItem[];
   sharedLinks: SharedLink[];
   notifications: Notification[];
   isStartMenuOpen: boolean;
@@ -60,16 +128,18 @@ interface OSState extends CustomizationState {
   maximizeWindow: (id: AppID) => void;
   focusWindow: (id: AppID) => void;
   updateWindowPosition: (id: AppID, x: number, y: number) => void;
-  
+
   addFile: (file: Omit<FileItem, 'id' | 'lastModified'>) => void;
   toggleFavorite: (id: string) => void;
+  addToRecent: (item: { id: string; path?: string; name: string; type: 'file' | 'folder' }) => void;
+  toggleDriveFavorite: (path: string, name: string) => void;
   deleteFile: (id: string) => void;
   restoreFile: (id: string) => void;
   permanentlyDeleteFile: (id: string) => void;
-  
+
   createSharedLink: (fileName: string) => void;
   deleteSharedLink: (id: string) => void;
-  
+
   addNotification: (title: string, message: string, type?: Notification['type']) => void;
   removeNotification: (id: string) => void;
 }
@@ -81,7 +151,9 @@ export const useOSStore = create<OSState>((set, get) => ({
   windows: [],
   activeWindowId: null,
   isStartMenuOpen: false,
-  files: [],
+  files: loadFiles(),
+  recentItems: loadRecent(),
+  favoriteDriveItems: loadFavoriteDrive(),
   sharedLinks: [],
   notifications: [],
   timezone: 'UTC',
@@ -167,28 +239,63 @@ export const useOSStore = create<OSState>((set, get) => ({
     const newFile: FileItem = {
       ...file,
       id: Math.random().toString(36).substr(2, 9),
-      lastModified: new Date().toISOString().split('T')[0],
+      lastModified: new Date().toISOString(),
       isDeleted: false,
       isFavorite: false
     };
-    return { files: [newFile, ...state.files] };
+    const next = { files: [newFile, ...state.files] };
+    saveFiles(next.files);
+    return next;
   }),
 
-  toggleFavorite: (id) => set((state) => ({
-    files: state.files.map(f => f.id === id ? { ...f, isFavorite: !f.isFavorite } : f)
-  })),
+  toggleFavorite: (id) => set((state) => {
+    const files = state.files.map(f => f.id === id ? { ...f, isFavorite: !f.isFavorite } : f);
+    saveFiles(files);
+    return { files };
+  }),
 
-  deleteFile: (id) => set((state) => ({
-    files: state.files.map(f => f.id === id ? { ...f, isDeleted: true } : f)
-  })),
+  addToRecent: (item) => set((state) => {
+    const now = new Date().toISOString();
+    const existing = state.recentItems.find(r => r.id === item.id);
+    const rest = state.recentItems.filter(r => r.id !== item.id);
+    const next: RecentItem = {
+      id: item.id,
+      path: item.path,
+      name: item.name,
+      type: item.type,
+      lastAccessed: now
+    };
+    const recentItems = [next, ...rest].slice(0, 100);
+    saveRecent(recentItems);
+    return { recentItems };
+  }),
 
-  restoreFile: (id) => set((state) => ({
-    files: state.files.map(f => f.id === id ? { ...f, isDeleted: false } : f)
-  })),
+  toggleDriveFavorite: (path, name) => set((state) => {
+    const exists = state.favoriteDriveItems.some(f => f.path === path);
+    const favoriteDriveItems = exists
+      ? state.favoriteDriveItems.filter(f => f.path !== path)
+      : [...state.favoriteDriveItems, { path, name }];
+    saveFavoriteDrive(favoriteDriveItems);
+    return { favoriteDriveItems };
+  }),
 
-  permanentlyDeleteFile: (id) => set((state) => ({
-    files: state.files.filter(f => f.id !== id)
-  })),
+  deleteFile: (id) => set((state) => {
+    const files = state.files.map(f => f.id === id ? { ...f, isDeleted: true } : f);
+    saveFiles(files);
+    return { files };
+  }),
+
+  restoreFile: (id) => set((state) => {
+    const files = state.files.map(f => f.id === id ? { ...f, isDeleted: false } : f);
+    saveFiles(files);
+    return { files };
+  }),
+
+  permanentlyDeleteFile: (id) => set((state) => {
+    const files = state.files.filter(f => f.id !== id);
+    saveFiles(files);
+    return { files };
+  }),
 
   createSharedLink: (fileName) => set((state) => {
     const newLink: SharedLink = {

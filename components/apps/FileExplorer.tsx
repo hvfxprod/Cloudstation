@@ -53,7 +53,7 @@ async function safeCopyToClipboard(text: string): Promise<boolean> {
 type NavTab = 'drive' | 'favorites' | 'recent' | 'recycle';
 
 const FileExplorer: React.FC = () => {
-  const { files, deleteFile, restoreFile, permanentlyDeleteFile, addFile, toggleFavorite, createSharedLink, addNotification } = useOSStore();
+  const { files, recentItems, favoriteDriveItems, deleteFile, restoreFile, permanentlyDeleteFile, addFile, toggleFavorite, addToRecent, toggleDriveFavorite, createSharedLink, addNotification } = useOSStore();
   const [shareLoadingId, setShareLoadingId] = useState<string | null>(null);
   const [activeNav, setActiveNav] = useState<NavTab>('drive');
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
@@ -90,16 +90,38 @@ const FileExplorer: React.FC = () => {
 
   const filteredFiles = useMemo(() => {
     switch (activeNav) {
-      case 'favorites':
-        return files.filter(f => f.isFavorite && !f.isDeleted);
+      case 'favorites': {
+        const fromStore = files.filter(f => f.isFavorite && !f.isDeleted);
+        const fromDrive = favoriteDriveItems.map(f => ({
+          id: f.path,
+          name: f.name,
+          type: 'file' as const,
+          size: '--',
+          lastModified: '--',
+          isFavorite: true,
+          isDriveFavorite: true
+        }));
+        return [...fromStore, ...fromDrive];
+      }
       case 'recent':
-        return [...files].filter(f => !f.isDeleted).sort((a, b) => new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime());
+        return recentItems
+          .slice()
+          .sort((a, b) => new Date(b.lastAccessed).getTime() - new Date(a.lastAccessed).getTime())
+          .map(r => ({
+            id: r.id,
+            name: r.name,
+            type: r.type,
+            size: '--',
+            lastModified: r.lastAccessed,
+            path: r.path,
+            isRecentItem: true
+          }));
       case 'recycle':
         return files.filter(f => f.isDeleted);
       default:
         return files.filter(f => !f.isDeleted);
     }
-  }, [files, activeNav]);
+  }, [files, activeNav, recentItems, favoriteDriveItems]);
 
   const displayItems = activeNav === 'drive' ? driveItems : filteredFiles;
   const isDrive = activeNav === 'drive';
@@ -133,6 +155,7 @@ const FileExplorer: React.FC = () => {
   };
 
   const handleDriveRowClick = (item: FsItem) => {
+    addToRecent({ id: item.id, path: item.id, name: item.name, type: item.type });
     if (item.type === 'folder') {
       const newPath = drivePath ? `${drivePath}/${item.name}` : item.name;
       setDrivePath(newPath);
@@ -142,6 +165,7 @@ const FileExplorer: React.FC = () => {
 
   const handleDownload = (item: { id: string; name: string; type: string }) => {
     if (isDrive && item.type === 'file') {
+      addToRecent({ id: item.id, path: item.id, name: item.name, type: 'file' });
       window.open(downloadUrl(item.id), '_blank');
     }
   };
@@ -293,7 +317,7 @@ const FileExplorer: React.FC = () => {
               <thead>
                 <tr className="text-[11px] font-bold text-slate-400 uppercase tracking-wider border-b border-black/5">
                   <th className="px-4 py-2 font-semibold">Name</th>
-                  {!isDrive && <th className="px-4 py-2 font-semibold text-center">Favorite</th>}
+                  <th className="px-4 py-2 font-semibold text-center">Favorite</th>
                   <th className="px-4 py-2 font-semibold">Size</th>
                   <th className="px-4 py-2 font-semibold">Last Modified</th>
                   <th className="px-4 py-2 font-semibold text-right">Action</th>
@@ -303,7 +327,21 @@ const FileExplorer: React.FC = () => {
                 {displayItems.map((file) => (
                   <tr 
                     key={file.id}
-                    onClick={() => isDrive ? handleDriveRowClick(file as FsItem) : setSelectedFileId(file.id)}
+                    onClick={() => {
+                      if (isDrive) handleDriveRowClick(file as FsItem);
+                      else {
+                        const rec = file as { isRecentItem?: boolean; path?: string };
+                        if (rec.isRecentItem && rec.path) {
+                          setActiveNav('drive');
+                          const parent = rec.path.replace(/\/[^/]+$/, '').replace(/\\[^\\]+$/, '');
+                          setDrivePath(parent);
+                          setSelectedFileId(file.id);
+                        } else {
+                          if (!rec.isRecentItem) addToRecent({ id: file.id, name: file.name, type: file.type });
+                          setSelectedFileId(file.id);
+                        }
+                      }
+                    }}
                     className={`group border-b border-black/5 hover:bg-blue-50/50 cursor-pointer transition-colors ${
                       selectedFileId === file.id ? 'bg-blue-50' : ''
                     }`}
@@ -314,16 +352,35 @@ const FileExplorer: React.FC = () => {
                         <span className="text-sm font-medium truncate max-w-[300px]">{file.name}</span>
                       </div>
                     </td>
-                    {!isDrive && (
-                      <td className="px-4 py-3 text-center">
-                        <button 
-                          onClick={(e) => { e.stopPropagation(); toggleFavorite(file.id); }}
+                    <td className="px-4 py-3 text-center">
+                      {isDrive ? (
+                        (() => {
+                          const isFav = favoriteDriveItems.some(f => f.path === file.id);
+                          return (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); toggleDriveFavorite(file.id, file.name); }}
+                              className={`transition-colors p-1 rounded-full hover:bg-slate-100 ${isFav ? 'text-amber-500' : 'text-slate-200 hover:text-slate-300'}`}
+                            >
+                              <Star size={16} fill={isFav ? 'currentColor' : 'none'} />
+                            </button>
+                          );
+                        })()
+                      ) : (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if ((file as { isDriveFavorite?: boolean }).isDriveFavorite) {
+                              toggleDriveFavorite(file.id, file.name);
+                            } else {
+                              toggleFavorite(file.id);
+                            }
+                          }}
                           className={`transition-colors p-1 rounded-full hover:bg-slate-100 ${file.isFavorite ? 'text-amber-500' : 'text-slate-200 hover:text-slate-300'}`}
                         >
-                          <Star size={16} fill={file.isFavorite ? "currentColor" : "none"} />
+                          <Star size={16} fill={file.isFavorite ? 'currentColor' : 'none'} />
                         </button>
-                      </td>
-                    )}
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-sm text-slate-500">{file.size ?? '--'}</td>
                     <td className="px-4 py-3 text-sm text-slate-500">{file.lastModified}</td>
                     <td className="px-4 py-3">
@@ -352,31 +409,70 @@ const FileExplorer: React.FC = () => {
                             )}
                           </>
                         ) : activeNav !== 'recycle' ? (
-                          <>
-                            {file.type === 'file' && (
-                              <button 
-                                onClick={(e) => { e.stopPropagation(); createSharedLink(file.name); }}
-                                className="p-1.5 hover:text-blue-600 transition-colors" 
-                                title="Share"
-                              >
-                                <Share2 size={16} />
-                              </button>
-                            )}
-                            <button 
-                              onClick={(e) => { e.stopPropagation(); handleDownload(file); }}
-                              className="p-1.5 hover:text-blue-600 transition-colors" 
-                              title="Download"
-                            >
-                              <Download size={16} />
-                            </button>
-                            <button 
-                              onClick={(e) => { e.stopPropagation(); deleteFile(file.id); }}
-                              className="p-1.5 hover:text-red-600 transition-colors" 
-                              title="Move to Recycle Bin"
-                            >
-                              <Trash2 size={16} />
-                            </button>
-                          </>
+                          (() => {
+                            const rec = file as { isRecentItem?: boolean; path?: string; isDriveFavorite?: boolean };
+                            const isRecentDrive = rec.isRecentItem && rec.path;
+                            const isDriveFav = rec.isDriveFavorite;
+                            if (isRecentDrive || isDriveFav) {
+                              const path = rec.path || file.id;
+                              return (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setActiveNav('drive');
+                                      const parent = path.replace(/\/[^/]+$/, '').replace(/\\[^\\]+$/, '');
+                                      setDrivePath(parent);
+                                    }}
+                                    className="p-1.5 hover:text-blue-600 transition-colors"
+                                    title="Open in Drive"
+                                  >
+                                    <Folder size={16} />
+                                  </button>
+                                  {file.type === 'file' && (
+                                    <a
+                                      href={downloadUrl(path)}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="p-1.5 hover:text-blue-600 transition-colors"
+                                      title="Download"
+                                    >
+                                      <Download size={16} />
+                                    </a>
+                                  )}
+                                </>
+                              );
+                            }
+                            return (
+                              <>
+                                {file.type === 'file' && (
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); createSharedLink(file.name); }}
+                                    className="p-1.5 hover:text-blue-600 transition-colors"
+                                    title="Share"
+                                  >
+                                    <Share2 size={16} />
+                                  </button>
+                                )}
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleDownload(file); }}
+                                  className="p-1.5 hover:text-blue-600 transition-colors"
+                                  title="Download"
+                                >
+                                  <Download size={16} />
+                                </button>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); deleteFile(file.id); }}
+                                  className="p-1.5 hover:text-red-600 transition-colors"
+                                  title="Move to Recycle Bin"
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                              </>
+                            );
+                          })()
                         ) : (
                           <>
                             <button 

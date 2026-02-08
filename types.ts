@@ -37,3 +37,18 @@ export interface Notification {
   message: string;
   type: 'info' | 'success' | 'warning';
 }
+
+/** Recently opened file/folder (Drive path or store file id) */
+export interface RecentItem {
+  id: string;
+  path?: string;
+  name: string;
+  type: 'file' | 'folder';
+  lastAccessed: string;
+}
+
+/** Drive item saved as favorite (path = full path, name = display name) */
+export interface FavoriteDriveItem {
+  path: string;
+  name: string;
+}

@@ -15,10 +15,10 @@ const StartMenu: React.FC = () => {
 
   const apps: { id: AppID, label: string, icon: React.ReactNode, color: string }[] = [
     { id: 'file-explorer', label: 'File Station', icon: <FolderOpen />, color: 'bg-blue-500' },
+    { id: 'calendar', label: 'Calendar', icon: <Calendar />, color: 'bg-red-500' },
     { id: 'control-panel', label: 'Control Panel', icon: <Cpu />, color: 'bg-slate-700' },
     { id: 'shared-links', label: 'Shared Links', icon: <Share2 />, color: 'bg-emerald-500' },
     { id: 'ai-assistant', label: 'AI Assistant', icon: <Bot />, color: 'bg-purple-600' },
-    { id: 'calendar', label: 'Calendar', icon: <Calendar />, color: 'bg-amber-500' },
   ];
 
   return (
