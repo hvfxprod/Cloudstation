@@ -53,7 +53,7 @@ async function safeCopyToClipboard(text: string): Promise<boolean> {
 type NavTab = 'drive' | 'favorites' | 'recent' | 'recycle';
 
 const FileExplorer: React.FC = () => {
-  const { files, recentItems, favoriteDriveItems, deleteFile, restoreFile, permanentlyDeleteFile, addFile, toggleFavorite, addToRecent, toggleDriveFavorite, createSharedLink, addNotification } = useOSStore();
+  const { files, recentItems, favoriteDriveItems, deleteFile, restoreFile, permanentlyDeleteFile, addFile, toggleFavorite, addToRecent, toggleDriveFavorite, createSharedLink, addNotification, showToast } = useOSStore();
   const [shareLoadingId, setShareLoadingId] = useState<string | null>(null);
   const [activeNav, setActiveNav] = useState<NavTab>('drive');
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
@@ -64,7 +64,6 @@ const FileExplorer: React.FC = () => {
   const [driveItems, setDriveItems] = useState<FsItem[]>([]);
   const [driveLoading, setDriveLoading] = useState(false);
   const [driveError, setDriveError] = useState<string | null>(null);
-
   const loadDrive = async (path: string) => {
     setDriveLoading(true);
     setDriveError(null);
@@ -178,11 +177,14 @@ const FileExplorer: React.FC = () => {
       const copied = await safeCopyToClipboard(full);
       if (copied) {
         addNotification('Share link created', 'Link copied to clipboard. Manage in Shared Links.', 'success');
+        showToast('Share link created', 'Link copied to clipboard. Manage in Shared Links.');
       } else {
         addNotification('Share link created', `Link created.\n${full}`, 'info');
+        showToast('Share link created', 'Link created. Open Shared Links to copy.');
       }
     } catch (e) {
       addNotification('Share failed', e instanceof Error ? e.message : 'Failed to create share', 'warning');
+      showToast('Share failed', e instanceof Error ? e.message : 'Failed to create share', 'warning');
     } finally {
       setShareLoadingId(null);
     }

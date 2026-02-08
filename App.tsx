@@ -4,6 +4,7 @@ import WindowManager from './components/WindowManager';
 import StartMenu from './components/StartMenu';
 import WidgetStack from './components/WidgetStack';
 import LoginScreen from './components/LoginScreen';
+import Toast from './components/Toast';
 import { useOSStore } from './store';
 import { getDesktopBackgroundStyle, getOverlayOpacity } from './lib/customization';
 
@@ -91,6 +92,9 @@ const App: React.FC = () => {
       
       {/* Start Menu Overlay */}
       <StartMenu />
+
+      {/* Toast (e.g. share link created) */}
+      <Toast />
     </div>
   );
 };

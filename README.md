@@ -21,16 +21,12 @@
    ```bash
    docker compose up -d --build
    ```
-2. 호스트의 `/mnt/Theh_1/SMB_Share` 경로가 컨테이너 내부 `/data`로 마운트됩니다.  
-   File Station의 **My Drive**가 이 경로의 파일/폴더를 표시합니다.
-3. 접속: **http://서버IP:9999** (포트 9999)
+2. 접속: **http://서버IP:9999**
+3. **Control Panel → 일반(General)** 에서 **Compose .env** 카드로 이동한 뒤,  
+   **MOUNT_PATH**(호스트 마운트 경로), **TRUENAS_URL**, **TRUENAS_API_KEY**, **GEMINI_API_KEY** 등을 입력하고 **Save .env** 를 누르면 `data/.env` 파일이 생성·갱신됩니다.
+4. env를 바꾼 뒤에는 컨테이너를 재시작해야 적용됩니다:  
+   `docker compose up -d --force-recreate cloudstation`
 
-환경 변수(선택):
-- `DATA_PATH`: 컨테이너 내부 데이터 경로 (기본값: `/data`)
-- `PORT`: 서버 포트 (기본값: `9999`)
-- **TrueNAS 스토리지 풀 연동:** Control Panel Health 탭에서 TrueNAS 풀 상태를 보려면:
-  - `TRUENAS_URL`: TrueNAS 웹 UI 주소 (예: `https://192.168.1.10` 또는 `https://truenas.local`) — API 키 사용 시 HTTPS 권장
-  - `TRUENAS_API_KEY`: TrueNAS에서 발급한 API 키 (시스템 설정 → API 키에서 생성)
-
-다른 호스트 경로를 쓰려면 `docker-compose.yml`의 `volumes`를 수정하세요.
-본인의 SMB/파일 있는 위치를 Volumes 부분에 수정해서 사용하세요
+- 컨테이너의 `/data`는 호스트의 `./data`와 연결됩니다. **MOUNT_PATH**에 다른 경로(예: NAS 마운트 경로)를 넣으면 SFTP/파일 루트로 사용됩니다. 같은 경로를 쓰려면 `MOUNT_PATH`를 `./data` 또는 `/data`로 두면 됩니다.
+- **TrueNAS**: Health 탭에서 풀/디스크를 보려면 `TRUENAS_URL`, `TRUENAS_API_KEY`를 .env에 설정하세요.
+- **AI Assistant**: `GEMINI_API_KEY`를 .env에 설정하세요.

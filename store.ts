@@ -112,6 +112,7 @@ interface OSState extends CustomizationState {
   favoriteDriveItems: FavoriteDriveItem[];
   sharedLinks: SharedLink[];
   notifications: Notification[];
+  toast: { id: string; title: string; message: string; type: Notification['type'] } | null;
   isStartMenuOpen: boolean;
   timezone: string;
   language: string;
@@ -142,6 +143,8 @@ interface OSState extends CustomizationState {
 
   addNotification: (title: string, message: string, type?: Notification['type']) => void;
   removeNotification: (id: string) => void;
+  showToast: (title: string, message: string, type?: Notification['type']) => void;
+  clearToast: () => void;
 }
 
 const initialCustom = loadCustomization();
@@ -156,6 +159,7 @@ export const useOSStore = create<OSState>((set, get) => ({
   favoriteDriveItems: loadFavoriteDrive(),
   sharedLinks: [],
   notifications: [],
+  toast: null,
   timezone: 'UTC',
   language: 'en',
 
@@ -330,4 +334,9 @@ export const useOSStore = create<OSState>((set, get) => ({
   removeNotification: (id) => set((state) => ({
     notifications: state.notifications.filter(n => n.id !== id)
   })),
+
+  showToast: (title, message, type = 'info') => set({
+    toast: { id: Math.random().toString(36).slice(2, 11), title, message, type }
+  }),
+  clearToast: () => set({ toast: null }),
 }));

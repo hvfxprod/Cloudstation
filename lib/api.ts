@@ -54,7 +54,7 @@ export interface ShareItem {
 }
 
 export async function getShares(): Promise<ShareItem[]> {
-  const res = await fetch(`${API_BASE}/api/shares`);
+  const res = await fetch(`${API_BASE}/api/shares`, { credentials: 'include' });
   if (!res.ok) throw new Error('Failed to load shares');
   const data = await res.json();
   return (data as { shares?: ShareItem[] }).shares ?? [];
@@ -63,6 +63,7 @@ export async function getShares(): Promise<ShareItem[]> {
 export async function createShare(path: string, isDir: boolean, expiresInDays?: number): Promise<{ url: string; token: string }> {
   const res = await fetch(`${API_BASE}/api/shares`, {
     method: 'POST',
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path, isDir, expiresInDays }),
   });
@@ -75,7 +76,7 @@ export async function createShare(path: string, isDir: boolean, expiresInDays?: 
 }
 
 export async function deleteShare(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/shares/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  const res = await fetch(`${API_BASE}/api/shares/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' });
   if (!res.ok) throw new Error('Failed to delete share');
 }
 

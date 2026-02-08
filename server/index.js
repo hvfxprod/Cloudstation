@@ -19,19 +19,23 @@ const app = express();
 const PORT = process.env.PORT || 9000;
 
 const DATA_PATH = process.env.DATA_PATH || path.join(__dirname, 'data');
+/** File Station "My Drive" root (MOUNT_PATH in container). Falls back to DATA_PATH when not set. */
+const DRIVE_ROOT = process.env.DRIVE_PATH || DATA_PATH;
 const SECURITY_FILE = path.join(DATA_PATH, 'security.json');
 const SHARES_FILE = process.env.SHARES_FILE || path.join(__dirname, 'shares.json');
 const SFTP_USERS_FILE = process.env.SFTP_USERS_FILE || path.join(DATA_PATH, '.sftp_users.json');
 const SFTP_CONTAINER_NAME = process.env.SFTP_CONTAINER_NAME || 'cloudstation-sftp';
 const SFTP_HOST_MOUNT_ROOT = process.env.SFTP_HOST_MOUNT_ROOT || DATA_PATH;
-const GEMINI_KEY_FILE = process.env.GEMINI_KEY_FILE || path.join(__dirname, '.gemini_key.enc');
 const GENERAL_FILE = path.join(DATA_PATH, 'general.json');
 const CALENDAR_FILE = path.join(DATA_PATH, 'calendar.json');
-const TRUENAS_KEY_FILE = path.join(DATA_PATH, '.truenas_key.enc');
 const ENCRYPTION_SECRET = process.env.ENCRYPTION_SECRET || 'cloudstation-gemini-key-secret-change-in-production';
-const NETDATA_URL = (process.env.NETDATA_URL || '').replace(/\/$/, '');
+/** TrueNAS: env only */
 const TRUENAS_URL = (process.env.TRUENAS_URL || '').replace(/\/$/, '');
 const TRUENAS_API_KEY = process.env.TRUENAS_API_KEY || '';
+/** AI Assistant: env only */
+const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || '').trim();
+/** Browse root for mount path picker (server filesystem) */
+const BROWSE_ROOT = process.env.MOUNT_BROWSE_ROOT || (path.sep === '\\' ? 'C:\\' : '/');
 
 const ALGO = 'aes-256-gcm';
 const IV_LEN = 16;
@@ -84,34 +88,6 @@ function decryptKey(blob) {
   return decipher.update(enc) + decipher.final('utf8');
 }
 
-async function readGeminiKeyEncrypted() {
-  try {
-    const raw = await fs.readFile(GEMINI_KEY_FILE, 'utf8');
-    return raw.trim();
-  } catch {
-    return null;
-  }
-}
-
-async function getGeminiKeyDecrypted() {
-  const blob = await readGeminiKeyEncrypted();
-  if (!blob) return null;
-  try {
-    return decryptKey(blob);
-  } catch {
-    return null;
-  }
-}
-
-async function writeGeminiKeyEncrypted(plainKey) {
-  if (!plainKey || !plainKey.trim()) {
-    await fs.unlink(GEMINI_KEY_FILE).catch(() => {});
-    return;
-  }
-  const enc = encryptKey(plainKey.trim());
-  await fs.writeFile(GEMINI_KEY_FILE, enc, 'utf8');
-}
-
 async function readGeneralConfig() {
   try {
     const raw = await fs.readFile(GENERAL_FILE, 'utf8');
@@ -127,47 +103,25 @@ async function writeGeneralConfig(obj) {
   await fs.writeFile(GENERAL_FILE, JSON.stringify(obj, null, 2), 'utf8');
 }
 
-async function readTrueNASKeyEncrypted() {
-  try {
-    const raw = await fs.readFile(TRUENAS_KEY_FILE, 'utf8');
-    return raw.trim();
-  } catch {
-    return null;
-  }
-}
-
-async function getTrueNASKeyDecrypted() {
-  const blob = await readTrueNASKeyEncrypted();
-  if (!blob) return null;
-  try {
-    return decryptKey(blob);
-  } catch {
-    return null;
-  }
-}
-
-async function writeTrueNASKeyEncrypted(plainKey) {
-  if (!plainKey || !String(plainKey).trim()) {
-    await fs.unlink(TRUENAS_KEY_FILE).catch(() => {});
-    return;
-  }
-  const enc = encryptKey(String(plainKey).trim());
-  await fs.mkdir(path.dirname(TRUENAS_KEY_FILE), { recursive: true }).catch(() => {});
-  await fs.writeFile(TRUENAS_KEY_FILE, enc, 'utf8');
-}
-
-/** TrueNAS URL + API key: general.json + file first, then env */
-async function getTrueNASConfig() {
-  const general = await readGeneralConfig();
-  const url = (general.truenasUrl || '').toString().replace(/\/$/, '') || TRUENAS_URL;
-  const key = (url && (await getTrueNASKeyDecrypted())) || (url === TRUENAS_URL ? TRUENAS_API_KEY : '') || '';
-  return { url, key };
+/** TrueNAS URL + API key: env only (TRUENAS_URL, TRUENAS_API_KEY) */
+function getTrueNASConfig() {
+  return { url: TRUENAS_URL, key: TRUENAS_API_KEY };
 }
 
 function resolveSafe(relativePath) {
   const normalized = path.normalize(relativePath || '').replace(/^(\.\.(\/|\\|$))+/, '');
   const full = path.resolve(DATA_PATH, normalized);
   if (!full.startsWith(path.resolve(DATA_PATH))) {
+    return null;
+  }
+  return full;
+}
+
+/** Resolve path under DRIVE_ROOT (for File Station "My Drive"). */
+function resolveDriveSafe(relativePath) {
+  const normalized = path.normalize(relativePath || '').replace(/^(\.\.(\/|\\|$))+/, '');
+  const full = path.resolve(DRIVE_ROOT, normalized);
+  if (!full.startsWith(path.resolve(DRIVE_ROOT))) {
     return null;
   }
   return full;
@@ -513,7 +467,7 @@ app.put('/api/auth/config', async (req, res) => {
 app.get('/api/fs', async (req, res) => {
   try {
     const relativePath = (req.query.path || '').toString();
-    const dirPath = resolveSafe(relativePath);
+    const dirPath = resolveDriveSafe(relativePath);
     if (!dirPath) {
       return res.status(400).json({ error: 'Invalid path' });
     }
@@ -553,7 +507,7 @@ app.get('/api/fs', async (req, res) => {
 app.get('/api/fs/download', async (req, res) => {
   try {
     const relativePath = (req.query.path || '').toString();
-    const filePath = resolveSafe(relativePath);
+    const filePath = resolveDriveSafe(relativePath);
     if (!filePath) return res.status(400).json({ error: 'Invalid path' });
     const stat = await fs.stat(filePath);
     if (!stat.isFile()) return res.status(400).json({ error: 'Not a file' });
@@ -573,7 +527,7 @@ app.get('/api/fs/download', async (req, res) => {
 app.post('/api/fs/folder', async (req, res) => {
   try {
     const relativePath = (req.body?.path || '').toString();
-    const dirPath = resolveSafe(relativePath);
+    const dirPath = resolveDriveSafe(relativePath);
     if (!dirPath) return res.status(400).json({ error: 'Invalid path' });
     await fs.mkdir(dirPath, { recursive: true });
     res.json({ ok: true });
@@ -583,210 +537,9 @@ app.post('/api/fs/folder', async (req, res) => {
   }
 });
 
-// ---------- Netdata API (선택) ----------
-async function fetchNetdataJson(pathname) {
-  if (!NETDATA_URL) return null;
-  try {
-    const url = `${NETDATA_URL}${pathname}`;
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 5000);
-    const r = await fetch(url, { signal: ctrl.signal });
-    clearTimeout(t);
-    if (!r.ok) return null;
-    return await r.json();
-  } catch {
-    return null;
-  }
-}
-
-/** Netdata v1/data 응답: 첫 열이 시간이면 제외. [time, dim1, dim2, ...] — 라벨 또는 값으로 시간 열 판별 */
-function netdataRowValues(labels, row) {
-  if (!Array.isArray(labels) || !Array.isArray(row)) return { labels: [], values: [] };
-  const firstVal = Number(row[0]);
-  const looksLikeTime = Number.isFinite(firstVal) && firstVal > 1e9 && firstVal < 2e9;
-  const labelIsTime = labels[0] != null && /^time$/i.test(String(labels[0]).trim());
-  const offset = labelIsTime || looksLikeTime ? 1 : 0;
-  return {
-    labels: labels.slice(offset),
-    values: row.slice(offset),
-  };
-}
-
-function netdataLatestPair(res) {
-  const names = res?.dimension_names || res?.labels || [];
-  const latest = res?.latest_values;
-  if (Array.isArray(latest) && Array.isArray(names)) {
-    const skip = names[0] != null && /^time$/i.test(String(names[0]).trim()) ? 1 : 0;
-    return { labels: names.slice(skip), values: latest.slice(skip) };
-  }
-  if (Array.isArray(res?.data) && res.data.length) {
-    const last = res.data[res.data.length - 1];
-    return netdataRowValues(names, Array.isArray(last) ? last : []);
-  }
-  return { labels: [], values: [] };
-}
-
-function pickDimension(labels, values, regexes) {
-  for (let i = 0; i < labels.length; i++) {
-    const name = String(labels[i] ?? '');
-    if (regexes.some((r) => r.test(name))) {
-      const v = Number(values[i]);
-      if (Number.isFinite(v)) return v;
-    }
-  }
-  return 0;
-}
-
-async function getDiskSpacesFromNetdata() {
-  const chartsRes = await fetchNetdataJson('/api/v1/charts');
-  const chartsObj = chartsRes?.charts;
-  if (!chartsObj || typeof chartsObj !== 'object') return null;
-
-  const diskCharts = Object.entries(chartsObj)
-    .map(([id, info]) => ({ id, info }))
-    .filter(({ info }) => String(info?.context || '').toLowerCase() === 'disk.space');
-
-  if (!diskCharts.length) return null;
-
-  // 너무 많은 마운트를 한 번에 가져오지 않도록 제한
-  const targets = diskCharts.slice(0, 12);
-  const results = await Promise.all(
-    targets.map(async ({ id, info }) => {
-      const r = await fetchNetdataJson(`/api/v1/data?chart=${encodeURIComponent(id)}&points=1&format=json&options=jsonwrap`);
-      if (!r) return null;
-      const { labels, values } = netdataLatestPair(r);
-      if (!labels.length || !values.length) return null;
-
-      // Netdata disk.space의 대표 dimension: used, avail(available), free 등 (환경에 따라 다름)
-      const used = pickDimension(labels, values, [/^used$/i, /used/i]);
-      const avail = pickDimension(labels, values, [/^avail$/i, /avail/i, /^available$/i, /free/i]);
-      const total = used + avail;
-      const usedPercent = total > 0 ? (used / total) * 100 : null;
-
-      return {
-        chartId: id,
-        mount: info?.family || info?.title || id,
-        used,
-        avail,
-        total: total || null,
-        usedPercent,
-        units: r?.units || info?.units || null,
-      };
-    })
-  );
-
-  const disks = results.filter(Boolean);
-  return disks.length ? disks : null;
-}
-
-async function getDiskIOFromNetdata() {
-  const chartsRes = await fetchNetdataJson('/api/v1/charts');
-  const chartsObj = chartsRes?.charts;
-  if (!chartsObj || typeof chartsObj !== 'object') return null;
-
-  const ioCharts = Object.entries(chartsObj)
-    .map(([id, info]) => ({ id, info }))
-    .filter(({ info }) => String(info?.context || '').toLowerCase() === 'disk.io');
-
-  if (!ioCharts.length) return null;
-
-  const targets = ioCharts.slice(0, 12);
-  const results = await Promise.all(
-    targets.map(async ({ id, info }) => {
-      const r = await fetchNetdataJson(`/api/v1/data?chart=${encodeURIComponent(id)}&points=1&format=json&options=jsonwrap`);
-      if (!r) return null;
-      const { labels, values } = netdataLatestPair(r);
-      if (!labels.length || !values.length) return null;
-
-      // 대표 dimension: read, write (환경에 따라 reads/writes, read KiB/s 등)
-      const read = pickDimension(labels, values, [/^read$/i, /^reads$/i, /read/i]);
-      const write = pickDimension(labels, values, [/^write$/i, /^writes$/i, /write/i]);
-
-      return {
-        chartId: id,
-        device: info?.family || info?.title || id,
-        read,
-        write,
-        units: r?.units || info?.units || null,
-      };
-    })
-  );
-
-  const diskIO = results.filter(Boolean);
-  return diskIO.length ? diskIO : null;
-}
-
-/** Netdata에서 시스템 메트릭 가져오기. 실패 시 null. */
-async function getSystemFromNetdata() {
-  // jsonwrap 사용 시 latest_values / dimension_names 제공되면 시간 열 없이 사용 가능
-  const [cpuRes, ramRes] = await Promise.all([
-    fetchNetdataJson('/api/v1/data?context=system.cpu&points=1&format=json&options=jsonwrap'),
-    fetchNetdataJson('/api/v1/data?context=system.ram&points=1&format=json&options=jsonwrap'),
-  ]);
-
-  const { labels: cpuLabels, values: cpuV } = netdataLatestPair(cpuRes);
-  let totalCpu = 0;
-  let idle = 0;
-  cpuLabels.forEach((label, i) => {
-    const v = Number(cpuV[i]);
-    if (Number.isFinite(v)) {
-      totalCpu += v;
-      if (/idle/i.test(String(label))) idle = v;
-    }
-  });
-  let cpuPercent = totalCpu > 0 ? Math.max(0, Math.min(100, 100 - (idle / totalCpu) * 100)) : null;
-  if (cpuPercent != null && (cpuPercent >= 99.5 || cpuPercent <= 0.5)) cpuPercent = null;
-
-  const { labels: ramLabels, values: ramV } = netdataLatestPair(ramRes);
-  let usedBytes = 0;
-  let freeBytes = 0;
-  let cachedBytes = 0;
-  ramLabels.forEach((label, i) => {
-    const v = Number(ramV[i]);
-    if (!Number.isFinite(v)) return;
-    const l = String(label).toLowerCase().replace(/\s+/g, ' ');
-    if (l === 'used' || l === 'used ram' || l === 'applications') usedBytes = v;
-    else if (l === 'free') freeBytes = v;
-    else if (l === 'cached') cachedBytes = v;
-  });
-  const toBytes = (x) => (x > 0 && x < 1e9 ? x * 1024 : x);
-  usedBytes = toBytes(usedBytes);
-  freeBytes = toBytes(freeBytes);
-  cachedBytes = toBytes(cachedBytes);
-  const totalBytes = usedBytes + freeBytes + cachedBytes || usedBytes + freeBytes;
-  if (totalBytes === 0 || usedBytes === 0) return null;
-  if (cpuPercent == null) return null;
-
-  const disks = await getDiskSpacesFromNetdata().catch(() => null);
-  const diskIO = await getDiskIOFromNetdata().catch(() => null);
-
-  return {
-    cpu: { percent: cpuPercent },
-    memory: { totalBytes, usedBytes },
-    storage: null,
-    disks,
-    diskIO,
-    source: 'netdata',
-  };
-}
-
-/** Netdata에서 네트워크 메트릭(옵션) 가져오기. hostname/인터페이스 목록은 os 기반 유지. */
-async function getNetworkStatsFromNetdata() {
-  const res = await fetchNetdataJson('/api/v1/data?context=net.net&points=1&format=json');
-  if (!res?.data?.length || !Array.isArray(res.labels)) return null;
-  const row = res.data[res.data.length - 1] || [];
-  const labels = res.labels;
-  const byInterface = {};
-  labels.forEach((label, i) => {
-    const v = Number(row[i]);
-    if (Number.isFinite(v) && label) byInterface[label] = v;
-  });
-  return Object.keys(byInterface).length ? { byInterface, source: 'netdata' } : null;
-}
-
 /** TrueNAS API로 호스트 네트워크 설정(호스트명, DNS, 인터페이스) 가져오기 */
 async function getTrueNASNetworkInfo() {
-  const { url, key } = await getTrueNASConfig();
+  const { url, key } = getTrueNASConfig();
   if (!url || !key) return null;
   const opts = { method: 'GET', headers: TRUENAS_HEADERS(url, key), signal: AbortSignal.timeout(10000) };
   try {
@@ -845,7 +598,6 @@ const PORT_SERVICE_NAMES = {
   8088: 'SFTP Panel',
   9000: 'PHP-FPM',
   9999: 'CloudStation',
-  19999: 'Netdata',
   31015: 'Portainer',
   30020: 'Nginx Proxy Manager',
 };
@@ -912,50 +664,52 @@ function getDiskHardwareInfo() {
   }
 }
 
-// ---------- 시스템 정보 ----------
+// ---------- 시스템 정보 (TrueNAS API 우선, 없으면 OS + checkDiskSpace) ----------
 app.get('/api/system', async (req, res) => {
   try {
-    let payload = await getSystemFromNetdata();
+    let payload = await getSystemFromTrueNAS();
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const usedMem = totalMem - freeMem;
+    const cpus = os.cpus?.() || [];
+    const load = os.loadavg?.()[0] ?? 0;
+    const cpuPercent = cpus.length ? Math.max(0, Math.min(100, (load / cpus.length) * 100)) : null;
     if (!payload) {
-      const totalMem = os.totalmem();
-      const freeMem = os.freemem();
-      const usedMem = totalMem - freeMem;
-      const cpus = os.cpus?.() || [];
-      const load = os.loadavg?.()[0] ?? 0;
-      const cpuPercent = cpus.length ? Math.max(0, Math.min(100, (load / cpus.length) * 100)) : null;
-      payload = {
-        cpu: { percent: cpuPercent },
-        memory: { totalBytes: totalMem, usedBytes: usedMem },
-        storage: null,
-      };
+      payload = { cpu: null, memory: null, storage: null, disks: null, source: null };
     }
+    const memory = payload.memory ?? { totalBytes: totalMem, usedBytes: usedMem };
+    const cpu = payload.cpu ?? { percent: cpuPercent };
 
-    // 시스템 메트릭이 OS 폴백이어도, 디스크 정보는 Netdata에서 별도로 시도
     let disks = payload.disks ?? null;
-    let diskIO = payload.diskIO ?? null;
-    if (disks == null) disks = await getDiskSpacesFromNetdata().catch(() => null);
-    if (diskIO == null) diskIO = await getDiskIOFromNetdata().catch(() => null);
-
-    let storage = payload.storage;
+    let storage = payload.storage ?? null;
     if (storage == null) {
+      const pathToCheck = DRIVE_ROOT && DRIVE_ROOT !== DATA_PATH ? DRIVE_ROOT : DATA_PATH;
       try {
-        const info = await checkDiskSpace(DATA_PATH);
+        const info = await checkDiskSpace(pathToCheck);
         const usedBytes = info.size - info.free;
         storage = {
-          path: DATA_PATH,
+          path: pathToCheck,
           totalBytes: info.size,
           usedBytes,
         };
       } catch (e) {
-        console.warn('Failed to read disk space for', DATA_PATH, e?.message ?? e);
+        if (pathToCheck !== DATA_PATH) {
+          try {
+            const info = await checkDiskSpace(DATA_PATH);
+            storage = { path: DATA_PATH, totalBytes: info.size, usedBytes: info.size - info.free };
+          } catch (e2) {
+            console.warn('Failed to read disk space for', pathToCheck, e?.message ?? e);
+          }
+        } else {
+          console.warn('Failed to read disk space for', DATA_PATH, e?.message ?? e);
+        }
       }
     }
 
     const uptimeSeconds = typeof os.uptime === 'function' ? os.uptime() : undefined;
     const loadAvg = typeof os.loadavg === 'function' ? os.loadavg() : undefined;
-    const cpus = typeof os.cpus === 'function' ? os.cpus() : [];
     const cpuInfo = {
-      ...payload.cpu,
+      ...cpu,
       ...(cpus.length > 0 && {
         model: cpus[0]?.model ?? null,
         cores: cpus.length,
@@ -963,12 +717,11 @@ app.get('/api/system', async (req, res) => {
     };
     res.json({
       storage,
-      memory: payload.memory,
+      memory,
       cpu: cpuInfo,
       ...(uptimeSeconds != null && Number.isFinite(uptimeSeconds) && { uptimeSeconds }),
       ...(Array.isArray(loadAvg) && loadAvg.length > 0 && { loadAverage: loadAvg }),
       ...(disks != null && { disks }),
-      ...(diskIO != null && { diskIO }),
       ...(payload.source && { source: payload.source }),
     });
   } catch (err) {
@@ -1114,7 +867,7 @@ function parsePoolTopology(topology) {
 
 /** TrueNAS REST API로 스토리지 풀 목록·상세(토폴로지) 조회 */
 async function getTrueNASPoolStatus() {
-  const { url: baseUrl, key } = await getTrueNASConfig();
+  const { url: baseUrl, key } = getTrueNASConfig();
   if (!baseUrl || !key) return [];
   const url = `${baseUrl}/api/v2.0/pool`;
   try {
@@ -1159,9 +912,87 @@ async function getTrueNASPoolStatus() {
   }
 }
 
+/** TrueNAS REST API로 풀/데이터셋 용량(used/available) 조회. disk.space 대체용. */
+async function getTrueNASPoolDatasets() {
+  const { url: baseUrl, key } = getTrueNASConfig();
+  if (!baseUrl || !key) return null;
+  try {
+    const res = await fetch(`${baseUrl}/api/v2.0/pool/dataset`, {
+      method: 'GET',
+      headers: TRUENAS_HEADERS(baseUrl, key),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const list = Array.isArray(data) ? data : (data?.list ?? data?.results ?? []);
+    if (!list.length) return null;
+    const out = [];
+    for (const d of list) {
+      const usedRaw = d.used?.raw ?? d.used;
+      const availRaw = d.available?.raw ?? d.available;
+      const used = typeof usedRaw === 'number' ? usedRaw : null;
+      const avail = typeof availRaw === 'number' ? availRaw : null;
+      const total = used != null && avail != null ? used + avail : null;
+      const usedPercent = total != null && total > 0 && used != null ? (used / total) * 100 : null;
+      const name = d.name ?? d.id ?? '';
+      if (name) {
+        out.push({
+          chartId: name,
+          mount: name,
+          used: used != null ? used / (1024 * 1024) : 0,
+          avail: avail != null ? avail / (1024 * 1024) : 0,
+          total: total != null ? total / (1024 * 1024) : null,
+          usedPercent,
+          units: 'MiB',
+        });
+      }
+    }
+    return out.length ? out : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** TrueNAS API로 시스템 메트릭(스토리지·디스크) 가져오기. CPU/RAM은 REST로 제공 안 하므로 null. */
+async function getSystemFromTrueNAS() {
+  const { url: baseUrl, key } = getTrueNASConfig();
+  if (!baseUrl || !key) return null;
+  try {
+    const [datasets, pools] = await Promise.all([
+      getTrueNASPoolDatasets(),
+      getTrueNASPoolStatus(),
+    ]);
+    let storage = null;
+    if (Array.isArray(datasets) && datasets.length > 0) {
+      let totalUsed = 0;
+      let totalAvail = 0;
+      for (const d of datasets) {
+        const used = (d.used ?? 0) * 1024 * 1024;
+        const avail = (d.avail ?? 0) * 1024 * 1024;
+        totalUsed += used;
+        totalAvail += avail;
+      }
+      const totalBytes = totalUsed + totalAvail;
+      if (totalBytes > 0) {
+        storage = { path: 'TrueNAS', totalBytes, usedBytes: totalUsed };
+      }
+    }
+    const disks = datasets;
+    return {
+      cpu: null,
+      memory: null,
+      storage,
+      disks: disks ?? null,
+      source: 'truenas',
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
 /** TrueNAS REST API로 디스크 목록 조회 (이름, 용량, 모델 등) */
 async function getTrueNASDisks() {
-  const { url: baseUrl, key } = await getTrueNASConfig();
+  const { url: baseUrl, key } = getTrueNASConfig();
   if (!baseUrl || !key) return [];
   const url = `${baseUrl}/api/v2.0/disk`;
   try {
@@ -1189,7 +1020,7 @@ async function getTrueNASDisks() {
 
 /** TrueNAS 시스템에서 사용 중인 포트 (서비스별). SSH, 앱 사용 포트 등 */
 async function getTrueNASPorts() {
-  const { url: baseUrl, key } = await getTrueNASConfig();
+  const { url: baseUrl, key } = getTrueNASConfig();
   if (!baseUrl || !key) return [];
   const entries = [];
   const opts = { method: 'GET', headers: TRUENAS_HEADERS(baseUrl, key), signal: AbortSignal.timeout(8000) };
@@ -1308,77 +1139,134 @@ app.get('/api/raid', async (req, res) => {
   }
 });
 
-// ---------- 네트워크 정보 (TrueNAS 우선, 없으면 컨테이너 기준) ----------
-app.get('/api/network', async (req, res) => {
-  try {
-    let payload = await getTrueNASNetworkInfo();
-    if (!payload) {
-      const hostname = os.hostname();
-      const ifaces = os.networkInterfaces() || {};
-      const interfaces = [];
-      for (const [name, addrs] of Object.entries(ifaces)) {
-        if (!Array.isArray(addrs)) continue;
-        for (const a of addrs) {
-          if (a.family === 'IPv4' && !a.internal) {
-            interfaces.push({ name, address: a.address, family: a.family, mac: a.mac || null });
-          }
-        }
-      }
-      let dns = [];
-      try {
-        const resolv = await fs.readFile('/etc/resolv.conf', 'utf8');
-        const lines = resolv.split('\n');
-        for (const line of lines) {
-          const m = line.trim().match(/^nameserver\s+(\S+)/i);
-          if (m) dns.push(m[1]);
-        }
-      } catch {
-        // Windows or no resolv.conf
-      }
-      payload = { hostname, interfaces, dns, source: 'container' };
+// ---------- AI Assistant: API key from env only ----------
+app.get('/api/settings/gemini-key', (req, res) => {
+  res.json({ set: !!GEMINI_API_KEY });
+});
+
+// ---------- Compose .env file (MOUNT_PATH, TRUENAS_*, GEMINI_*). Written to DATA_PATH/.env ----------
+const ENV_FILE_PATH = path.join(DATA_PATH, '.env');
+const ENV_KEYS = ['MOUNT_PATH', 'TRUENAS_URL', 'TRUENAS_API_KEY', 'GEMINI_API_KEY', 'NETDATA_URL'];
+/** Project root (docker-compose.yml dir) mounted in container; used to sync MOUNT_PATH to host .env */
+const PROJECT_ROOT = process.env.PROJECT_ROOT || '/project';
+
+function parseEnvFile(content) {
+  const vars = {};
+  for (const line of (content || '').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq > 0) {
+      const key = trimmed.slice(0, eq).trim();
+      let val = trimmed.slice(eq + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) val = val.slice(1, -1);
+      vars[key] = val;
     }
-    const networkStats = await getNetworkStatsFromNetdata();
-    if (networkStats) payload.networkStats = networkStats;
-    res.json(payload);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
   }
-});
+  return vars;
+}
 
-// ---------- AI Assistant: API Key 암호화 저장 / 채팅 프록시 ----------
-app.get('/api/settings/gemini-key', async (req, res) => {
+function formatEnvFile(vars) {
+  const lines = ['# CloudStation compose environment. Generated by Control Panel.', ''];
+  for (const key of ENV_KEYS) {
+    const v = vars[key];
+    if (v != null && String(v).trim() !== '') lines.push(`${key}=${String(v).trim()}`);
+  }
+  return lines.join('\n') + '\n';
+}
+
+app.get('/api/settings/env-file', async (req, res) => {
   try {
-    const blob = await readGeminiKeyEncrypted();
-    res.json({ set: !!blob });
+    let content = '';
+    try {
+      content = await fs.readFile(ENV_FILE_PATH, 'utf8');
+    } catch {
+      // file may not exist yet
+    }
+    const vars = parseEnvFile(content);
+    const out = {};
+    for (const k of ENV_KEYS) out[k] = vars[k] ?? '';
+    res.json({ path: ENV_FILE_PATH, vars: out });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/api/settings/gemini-key', async (req, res) => {
+/** Merge MOUNT_PATH into project root .env so docker compose volume uses it on next up. */
+async function syncMountPathToProjectEnv(mountPathValue) {
+  const projectEnvPath = path.join(PROJECT_ROOT, '.env');
   try {
-    const { key } = req.body || {};
-    if (key == null) return res.status(400).json({ error: 'key required' });
-    await writeGeminiKeyEncrypted(String(key).trim());
-    res.json({ ok: true });
+    await fs.access(PROJECT_ROOT);
+  } catch {
+    return;
+  }
+  let lines = [];
+  try {
+    const content = await fs.readFile(projectEnvPath, 'utf8');
+    lines = content.split(/\r?\n/);
+  } catch {
+    // file may not exist
+  }
+  const value = String(mountPathValue ?? '').trim();
+  const newLine = value ? `MOUNT_PATH=${value}` : 'MOUNT_PATH=';
+  let found = false;
+  const outLines = lines.map((line) => {
+    const m = line.match(/^\s*MOUNT_PATH\s*=/);
+    if (m) {
+      found = true;
+      return newLine;
+    }
+    return line;
+  });
+  if (!found) outLines.push(newLine);
+  const out = outLines.join('\n').replace(/\n*$/, '\n');
+  await fs.writeFile(projectEnvPath, out, 'utf8');
+}
+
+app.put('/api/settings/env-file', async (req, res) => {
+  try {
+    const vars = req.body?.vars || req.body || {};
+    const out = {};
+    for (const k of ENV_KEYS) {
+      const v = vars[k];
+      out[k] = v != null ? String(v).trim() : '';
+    }
+    await fs.mkdir(path.dirname(ENV_FILE_PATH), { recursive: true });
+    await fs.writeFile(ENV_FILE_PATH, formatEnvFile(out), 'utf8');
+    try {
+      await syncMountPathToProjectEnv(out.MOUNT_PATH);
+    } catch (e) {
+      console.warn('Could not sync MOUNT_PATH to project .env:', e.message);
+    }
+    res.json({ ok: true, path: ENV_FILE_PATH });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ---------- General settings (language, timezone, TrueNAS, mount path) ----------
+// ---------- Drive root info (for File Station "My Drive" troubleshooting) ----------
+app.get('/api/settings/drive-info', async (req, res) => {
+  try {
+    const driveRoot = process.env.DRIVE_PATH || DATA_PATH;
+    res.json({
+      driveRoot,
+      hint: 'File Station "My Drive" shows the path mounted at this location. The volume is set when you run docker compose, using the .env in the same folder as docker-compose.yml (on the host). Add MOUNT_PATH=your/share/path there, then run: docker compose up -d',
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------- General settings (language, timezone, mount path). TrueNAS/AI from env. ----------
 app.get('/api/settings/general', async (req, res) => {
   try {
     const general = await readGeneralConfig();
-    const truenasApiKeySet = !!(await getTrueNASKeyDecrypted());
     res.json({
       language: general.language ?? 'en',
       timezone: general.timezone ?? 'UTC',
-      truenasUrl: general.truenasUrl ?? '',
-      truenasApiKeySet,
       mountPath: general.mountPath ?? '',
     });
   } catch (err) {
@@ -1390,14 +1278,9 @@ app.get('/api/settings/general', async (req, res) => {
 app.put('/api/settings/general', async (req, res) => {
   try {
     const general = await readGeneralConfig();
-    const { language, timezone, truenasUrl, truenasApiKey, mountPath } = req.body || {};
+    const { language, timezone, mountPath } = req.body || {};
     if (language !== undefined) general.language = String(language || 'en').slice(0, 16);
     if (timezone !== undefined) general.timezone = String(timezone || 'UTC').trim().slice(0, 128);
-    if (truenasUrl !== undefined) general.truenasUrl = String(truenasUrl || '').replace(/\/$/, '').trim().slice(0, 512);
-    if (truenasApiKey !== undefined) {
-      const v = String(truenasApiKey || '').trim();
-      await writeTrueNASKeyEncrypted(v || null);
-    }
     if (mountPath !== undefined) general.mountPath = String(mountPath || '').trim().slice(0, 1024);
     await writeGeneralConfig(general);
     res.json({ ok: true });
@@ -1407,12 +1290,75 @@ app.put('/api/settings/general', async (req, res) => {
   }
 });
 
+/** Restart this container so env_file (e.g. .env) changes take effect. Requires Docker socket and CONTAINER_NAME. */
+app.post('/api/settings/restart-container', async (req, res) => {
+  try {
+    const docker = getDocker();
+    if (!docker) return res.status(503).json({ error: 'Docker not available' });
+    const name = process.env.CONTAINER_NAME || 'cloudstation-pro';
+    const container = docker.getContainer(name);
+    res.json({ ok: true });
+    setTimeout(() => {
+      container.restart().catch((err) => console.error('Container restart failed:', err));
+    }, 400);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------- Browse server filesystem for mount path picker ----------
+function resolveBrowsePath(relativePath) {
+  const normalized = (relativePath || '')
+    .replace(/\\/g, path.sep)
+    .replace(new RegExp(`^${path.sep}+`), '');
+  const full = path.join(BROWSE_ROOT, normalized);
+  const resolved = path.resolve(full);
+  const rootResolved = path.resolve(BROWSE_ROOT);
+  if (!resolved.startsWith(rootResolved) && resolved !== rootResolved) return null;
+  return resolved;
+}
+
+app.get('/api/browse', async (req, res) => {
+  try {
+    const relativePath = (req.query.path || '').toString();
+    const dirPath = resolveBrowsePath(relativePath);
+    if (!dirPath) return res.status(400).json({ error: 'Invalid path' });
+    const stat = await fs.stat(dirPath);
+    if (!stat.isDirectory()) return res.status(400).json({ error: 'Not a directory' });
+    const entries = await fs.readdir(dirPath, { withFileTypes: true });
+    const items = await Promise.all(
+      entries.map(async (ent) => {
+        const full = path.join(dirPath, ent.name);
+        const s = await fs.stat(full).catch(() => null);
+        const type = s?.isDirectory() ? 'folder' : 'file';
+        return {
+          name: ent.name,
+          type,
+          path: path.join(relativePath, ent.name).replace(/\\/g, '/'),
+        };
+      })
+    );
+    const folders = items.filter((i) => i.type === 'folder').sort((a, b) => a.name.localeCompare(b.name));
+    const files = items.filter((i) => i.type === 'file').sort((a, b) => a.name.localeCompare(b.name));
+    const rootNorm = BROWSE_ROOT.replace(/\\/g, '/').replace(/\/+$/, '') || '/';
+    const isHostMount = rootNorm === '/host' || rootNorm.endsWith('/host');
+    const root = isHostMount ? '' : rootNorm;
+    const pathVal = (relativePath || '').replace(/\\/g, '/');
+    res.json({ root, path: pathVal, items: [...folders, ...files] });
+  } catch (err) {
+    if (err.code === 'ENOENT') return res.status(404).json({ error: 'Not found' });
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/ai/chat', async (req, res) => {
   try {
     const { message } = req.body || {};
     if (!message || typeof message !== 'string') return res.status(400).json({ error: 'message required' });
-    const apiKey = await getGeminiKeyDecrypted();
-    if (!apiKey) return res.status(400).json({ error: 'API key not set. Configure in Control Panel → AI Assistant.' });
+    const apiKey = GEMINI_API_KEY;
+    if (!apiKey) return res.status(400).json({ error: 'API key not set. Set GEMINI_API_KEY environment variable.' });
     const { GoogleGenAI } = await import('@google/genai');
     const ai = new GoogleGenAI({ apiKey });
     const response = await ai.models.generateContent({
@@ -1623,11 +1569,11 @@ app.get('/api/shares', async (req, res) => {
   }
 });
 
-// 공유 링크 생성
+// 공유 링크 생성 (My Drive 경로는 resolveDriveSafe 사용)
 app.post('/api/shares', async (req, res) => {
   try {
     const { path: relativePath, isDir = false, expiresInDays } = req.body || {};
-    const safePath = resolveSafe(relativePath);
+    const safePath = resolveDriveSafe(relativePath);
     if (!safePath) return res.status(400).json({ error: 'Invalid path' });
     const stat = await fs.stat(safePath).catch(() => null);
     if (!stat) return res.status(404).json({ error: 'File or folder not found' });
@@ -1692,16 +1638,16 @@ app.get('/s/:token', async (req, res) => {
     const shares = await readShares();
     const share = shares.find((s) => s.token === token && !s.revokedAt);
     if (!share) {
-      return res.status(404).send(shareDownloadPage('공유 링크를 찾을 수 없습니다.'));
+      return res.status(404).send(shareDownloadPage('Share link not found.'));
     }
     const now = new Date().toISOString();
     if (share.expiresAt && share.expiresAt < now) {
-      return res.status(410).send(shareDownloadPage('공유 링크가 만료되었습니다.'));
+      return res.status(410).send(shareDownloadPage('This share link has expired.'));
     }
-    const filePath = resolveSafe(share.path);
+    const filePath = resolveDriveSafe(share.path);
     if (!filePath) return res.status(400).send(shareDownloadPage('Invalid path'));
     const stat = await fs.stat(filePath).catch(() => null);
-    if (!stat) return res.status(404).send(shareDownloadPage('파일 또는 폴더를 찾을 수 없습니다.'));
+    if (!stat) return res.status(404).send(shareDownloadPage('File or folder not found.'));
     const fileName = path.basename(filePath);
     let fileSize = null;
     if (!share.isDir && stat.isFile()) {
@@ -1711,7 +1657,7 @@ app.get('/s/:token', async (req, res) => {
     res.send(shareDownloadPage(null, { fileName, path: share.path, fileSize, expiresLabel, accessCount: share.accessCount || 0, isDir: share.isDir }));
   } catch (err) {
     console.error(err);
-    res.status(500).send(shareDownloadPage('서버 오류가 발생했습니다.'));
+    res.status(500).send(shareDownloadPage('A server error occurred.'));
   }
 });
 
@@ -1721,13 +1667,13 @@ app.get('/s/:token/download', async (req, res) => {
     const { token } = req.params;
     const shares = await readShares();
     const share = shares.find((s) => s.token === token && !s.revokedAt);
-    if (!share) return res.status(404).send('공유 링크를 찾을 수 없습니다.');
+    if (!share) return res.status(404).send('Share link not found.');
     const now = new Date().toISOString();
-    if (share.expiresAt && share.expiresAt < now) return res.status(410).send('공유 링크가 만료되었습니다.');
-    const filePath = resolveSafe(share.path);
+    if (share.expiresAt && share.expiresAt < now) return res.status(410).send('This share link has expired.');
+    const filePath = resolveDriveSafe(share.path);
     if (!filePath) return res.status(400).send('Invalid path');
     const stat = await fs.stat(filePath).catch(() => null);
-    if (!stat) return res.status(404).send('파일 또는 폴더를 찾을 수 없습니다.');
+    if (!stat) return res.status(404).send('File or folder not found.');
 
     share.accessCount = (share.accessCount || 0) + 1;
     await writeShares(shares);
@@ -1749,46 +1695,74 @@ app.get('/s/:token/download', async (req, res) => {
     await archive.finalize();
   } catch (err) {
     console.error(err);
-    res.status(500).send('다운로드 중 오류가 발생했습니다.');
+    res.status(500).send('An error occurred while downloading.');
   }
 });
 
 function shareDownloadPage(error, data = {}) {
   const { fileName = '', path: filePath = '', fileSize = '', expiresLabel = '', accessCount = 0, isDir = false } = data;
-  const title = error ? '오류' : '공유 파일 다운로드';
+  const title = error ? 'Error' : 'Shared File Download';
   const escaped = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  const svgCheck = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>';
+  const svgDoc = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>';
+  const svgPin = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>';
+  const svgCal = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>';
+  const svgChart = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></svg>';
+  const svgDownload = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+  const fileIconSvg = isDir
+    ? '<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>'
+    : '<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>';
   return `<!DOCTYPE html>
-<html lang="ko">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>${escaped(title)} - CloudStation Pro</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <style>
-    body { font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #0f172a; color: #e2e8f0; padding: 20px; }
-    .box { max-width: 520px; width: 100%; background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 28px; }
-    h1 { margin: 0 0 8px 0; font-size: 22px; }
-    .muted { color: #94a3b8; font-size: 14px; margin-bottom: 20px; }
-    .error { background: #7f1d1d; color: #fecaca; padding: 14px; border-radius: 8px; margin-bottom: 16px; }
-    .row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #334155; }
-    .row:last-child { border-bottom: none; }
-    .label { color: #94a3b8; font-size: 14px; }
-    .btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 24px; font-size: 16px; font-weight: 600; background: #2563eb; color: white; border: none; border-radius: 8px; cursor: pointer; margin-top: 16px; }
+    * { box-sizing: border-box; }
+    body, .card, .secure, .btn, .back, .footer, .detail-label, .detail-value, h1, .subtitle, .error {
+      font-family: 'Inter', sans-serif;
+    }
+    body { margin: 0; min-height: 100vh; background: linear-gradient(180deg, #eef2ff 0%, #f8fafc 35%, #fff 100%); color: #1e293b; padding: 32px 24px 24px; display: flex; flex-direction: column; align-items: center; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+    .secure { display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 28px; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.06em; color: #15803d; }
+    .secure svg { flex-shrink: 0; }
+    .secure-circle { width: 24px; height: 24px; border-radius: 50%; background: #15803d; color: #fff; display: flex; align-items: center; justify-content: center; }
+    .card { max-width: 480px; width: 100%; background: #fff; border: 1px solid #e2e8f0; border-radius: 1.25rem; padding: 36px 32px 32px; box-shadow: 0 4px 24px rgba(0,0,0,0.06); text-align: center; }
+    .hero-icon { width: 88px; height: 88px; margin: 0 auto 20px; border-radius: 50%; background: #fff; border: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: center; color: #2563eb; }
+    .hero-icon-inner { width: 56px; height: 56px; border-radius: 12px; background: #dbeafe; display: flex; align-items: center; justify-content: center; }
+    h1 { margin: 0 0 8px; font-size: 1.5rem; font-weight: 700; color: #1e293b; letter-spacing: -0.02em; }
+    .subtitle { color: #64748b; font-size: 0.875rem; margin: 0 0 28px; }
+    .error { background: #fef2f2; color: #991b1b; padding: 14px 16px; border-radius: 10px; margin-bottom: 16px; border: 1px solid #fecaca; font-size: 0.875rem; text-align: left; }
+    .detail { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid #f1f5f9; text-align: left; }
+    .detail:last-of-type { border-bottom: none; }
+    .detail-icon { color: #64748b; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+    .detail-label { color: #64748b; font-size: 0.8125rem; width: 110px; flex-shrink: 0; }
+    .detail-value { color: #334155; font-size: 0.875rem; flex: 1; text-align: right; word-break: break-all; }
+    .detail-value.num { color: #2563eb; font-weight: 600; }
+    .btn { display: inline-flex; align-items: center; justify-content: center; gap: 10px; padding: 14px 28px; font-size: 1rem; font-weight: 600; background: #2563eb; color: #fff; border: none; border-radius: 0.75rem; cursor: pointer; margin-top: 24px; transition: background 0.2s; }
     .btn:hover { background: #1d4ed8; }
+    .back { display: block; margin-top: 20px; font-size: 0.8125rem; color: #94a3b8; text-decoration: none; }
+    .back:hover { color: #64748b; }
+    .footer { margin-top: auto; padding-top: 32px; font-size: 0.6875rem; font-weight: 500; letter-spacing: 0.12em; color: #94a3b8; }
   </style>
 </head>
 <body>
-  <div class="box">
+  ${!error ? `<div class="secure"><span class="secure-circle">${svgCheck}</span> SECURE LINK VERIFIED BY CLOUDSTATION</div>` : ''}
+  <div class="card">
     ${error ? `<div class="error">${escaped(error)}</div>` : `
-    <h1>📥 파일 다운로드</h1>
-    <p class="muted">공유된 파일을 다운로드하세요</p>
-    <div class="row"><span class="label">파일명</span><span>${isDir ? '📁' : '📄'} ${escaped(fileName)}</span></div>
-    ${fileSize ? `<div class="row"><span class="label">크기</span><span>${escaped(fileSize)}</span></div>` : ''}
-    <div class="row"><span class="label">경로</span><span>${escaped(filePath)}</span></div>
-    <div class="row"><span class="label">만료</span><span>${escaped(expiresLabel)}</span></div>
-    <div class="row"><span class="label">다운로드 횟수</span><span>${accessCount}회</span></div>
-    <button class="btn" onclick="location.href=location.pathname+'/download'">다운로드</button>
+    <div class="hero-icon"><div class="hero-icon-inner">${fileIconSvg}</div></div>
+    <h1>File Download</h1>
+    <p class="subtitle">Download shared files securely</p>
+    <div class="detail"><span class="detail-icon">${svgDoc}</span><span class="detail-label">Filename</span><span class="detail-value">${escaped(fileName)}</span></div>
+    <div class="detail"><span class="detail-icon">${svgPin}</span><span class="detail-label">Path</span><span class="detail-value">${escaped(filePath)}</span></div>
+    <div class="detail"><span class="detail-icon">${svgCal}</span><span class="detail-label">Expires</span><span class="detail-value">${escaped(expiresLabel)}</span></div>
+    <div class="detail"><span class="detail-icon">${svgChart}</span><span class="detail-label">Download count</span><span class="detail-value num">${escaped(String(accessCount))} times</span></div>
+    <button class="btn" onclick="location.href=location.pathname+'/download'">${svgDownload} Start Download</button>
+    <a class="back" href="javascript:if(window.history.length>1)history.back();else location.href='/';">&larr; Back to previous page</a>
     `}
   </div>
+  <div class="footer">POWERED BY CLOUDSTATION PRO WEBOS</div>
 </body>
 </html>`;
 }

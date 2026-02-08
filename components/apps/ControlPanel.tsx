@@ -1,17 +1,17 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { 
-  Activity, Database, Users, Shield, Globe, Cpu, RefreshCw, UserPlus, ShieldAlert, Key, Globe2, Monitor, Wifi, Palette, Bot, HardDrive, Server, Clock, Layers, FileText, X, Lock, Settings
+  Activity, Database, Users, Shield, Globe, Cpu, RefreshCw, UserPlus, ShieldAlert, Key, Globe2, Monitor, Palette, Bot, HardDrive, Server, Clock, Layers, FileText, X, Lock, Settings, Folder, FolderOpen, Loader2
 } from 'lucide-react';
 import { useOSStore, type ThemeMode } from '../../store';
 import LoginSettingsModal from '../LoginSettingsModal';
-import { getGeminiKeySet, saveGeminiKey } from '../../lib/ai';
+import { getGeminiKeySet } from '../../lib/ai';
 import { BACKGROUND_PRESETS } from '../../lib/customization';
 import { t, type Lang } from '../../lib/i18n';
 import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip } from 'recharts';
 
-type TabID = 'general' | 'health' | 'users' | 'security' | 'display' | 'network' | 'update' | 'ai-assistant' | 'sftp' | 'system-log' | 'ports';
+type TabID = 'general' | 'health' | 'users' | 'security' | 'display' | 'update' | 'ai-assistant' | 'sftp' | 'system-log' | 'ports';
 
 function FirewallModal({
   enabled,
@@ -148,11 +148,15 @@ function TwoFaModal({
   return createPortal(modal, document.body);
 }
 
+const ENV_FILE_KEYS = ['MOUNT_PATH', 'TRUENAS_URL', 'TRUENAS_API_KEY', 'GEMINI_API_KEY', 'NETDATA_URL'];
+function envVarsChanged(current: Record<string, string>, initial: Record<string, string>): boolean {
+  return ENV_FILE_KEYS.some((k) => (current[k] ?? '') !== (initial[k] ?? ''));
+}
+
 const ControlPanel: React.FC = () => {
   const { addNotification, theme, background, backgroundCustomUrl, setTheme, setBackground, setBackgroundCustomUrl, setTimezone, setLanguage } = useOSStore();
   const language = useOSStore((s) => s.language) as Lang;
   const [activeTab, setActiveTab] = useState<TabID>('health');
-  const [aiApiKeyInput, setAiApiKeyInput] = useState('');
   const [geminiKeySet, setGeminiKeySet] = useState<boolean | null>(null);
   const [cpuUsage, setCpuUsage] = useState<number | null>(null);
   const [ramUsageGb, setRamUsageGb] = useState<number | null>(null);
@@ -199,14 +203,6 @@ const ControlPanel: React.FC = () => {
   const [sftpAddName, setSftpAddName] = useState('');
   const [sftpAddPassword, setSftpAddPassword] = useState('');
   const [sftpAddMount, setSftpAddMount] = useState('');
-  const [networkData, setNetworkData] = useState<{
-    hostname: string;
-    interfaces: { name: string; address: string; family: string; mac?: string | null }[];
-    dns: string[];
-    source?: string;
-    networkStats?: { byInterface: Record<string, number>; source: string };
-  } | null>(null);
-  const [networkLoading, setNetworkLoading] = useState(false);
   const [systemLogs, setSystemLogs] = useState<{ time: string; level: string; text: string }[]>([]);
   const [systemLogLoading, setSystemLogLoading] = useState(false);
   const [firewallEnabled, setFirewallEnabled] = useState(false);
@@ -226,11 +222,23 @@ const ControlPanel: React.FC = () => {
   const [generalSaving, setGeneralSaving] = useState(false);
   const [generalLanguage, setGeneralLanguage] = useState('en');
   const [generalTimezone, setGeneralTimezone] = useState('UTC');
-  const [generalTruenasUrl, setGeneralTruenasUrl] = useState('');
-  const [generalTruenasApiKey, setGeneralTruenasApiKey] = useState('');
-  const [generalTruenasApiKeySet, setGeneralTruenasApiKeySet] = useState(false);
   const [generalMountPath, setGeneralMountPath] = useState('');
-  const [generalAiKey, setGeneralAiKey] = useState('');
+  const [envFileVars, setEnvFileVars] = useState<Record<string, string>>({
+    MOUNT_PATH: '',
+    TRUENAS_URL: '',
+    TRUENAS_API_KEY: '',
+    GEMINI_API_KEY: '',
+    NETDATA_URL: '',
+  });
+  const [envFileSaving, setEnvFileSaving] = useState(false);
+  const [envFilePath, setEnvFilePath] = useState('');
+  const initialEnvVarsRef = useRef<Record<string, string>>({});
+  const [showRestartConfirmModal, setShowRestartConfirmModal] = useState(false);
+  const [browseModalOpen, setBrowseModalOpen] = useState(false);
+  const [browseRoot, setBrowseRoot] = useState('');
+  const [browsePath, setBrowsePath] = useState('');
+  const [browseItems, setBrowseItems] = useState<{ name: string; type: string; path: string }[]>([]);
+  const [browseLoading, setBrowseLoading] = useState(false);
   useEffect(() => {
     const fetchSystem = async () => {
       try {
@@ -297,17 +305,20 @@ const ControlPanel: React.FC = () => {
       setGeneralLoading(true);
       Promise.all([
         fetch('/api/settings/general', { credentials: 'include' }).then((r) => (r.ok ? r.json() : null)),
-        getGeminiKeySet(),
+        fetch('/api/settings/env-file', { credentials: 'include' }).then((r) => (r.ok ? r.json() : null)),
       ])
-        .then(([data, aiSet]) => {
+        .then(([data, envData]) => {
           if (data) {
             setGeneralLanguage(data.language ?? 'en');
             setGeneralTimezone(data.timezone ?? 'UTC');
-            setGeneralTruenasUrl(data.truenasUrl ?? '');
-            setGeneralTruenasApiKeySet(!!data.truenasApiKeySet);
             setGeneralMountPath(data.mountPath ?? '');
           }
-          setGeminiKeySet(!!aiSet);
+          if (envData?.vars) {
+            const vars = { ...envData.vars };
+            setEnvFileVars((prev) => ({ ...prev, ...vars }));
+            initialEnvVarsRef.current = vars;
+            if (envData.path) setEnvFilePath(envData.path);
+          }
         })
         .catch(() => {})
         .finally(() => setGeneralLoading(false));
@@ -316,19 +327,6 @@ const ControlPanel: React.FC = () => {
   useEffect(() => {
     if (activeTab === 'ai-assistant') {
       getGeminiKeySet().then(setGeminiKeySet);
-    }
-  }, [activeTab]);
-
-  useEffect(() => {
-    if (activeTab === 'network') {
-      setNetworkLoading(true);
-      fetch('/api/network')
-        .then((res) => (res.ok ? res.json() : null))
-        .then((data) => {
-          setNetworkData(data || null);
-        })
-        .catch(() => setNetworkData(null))
-        .finally(() => setNetworkLoading(false));
     }
   }, [activeTab]);
 
@@ -465,77 +463,114 @@ const ControlPanel: React.FC = () => {
                   </select>
                 </div>
                 <div className="bg-white p-6 rounded-2xl border border-slate-200">
-                  <h3 className="font-bold text-slate-800 mb-3">{t('truenasApi', language)}</h3>
-                  <p className="text-sm text-slate-500 mb-2">{t('truenasApiDesc', language)}</p>
-                  <input
-                    type="text"
-                    value={generalTruenasUrl}
-                    onChange={(e) => setGeneralTruenasUrl(e.target.value)}
-                    placeholder="https://truenas.example.com"
-                    className="w-full px-4 py-2 border border-slate-200 rounded-lg text-sm mb-2"
-                  />
-                  <input
-                    type="password"
-                    value={generalTruenasApiKey}
-                    onChange={(e) => setGeneralTruenasApiKey(e.target.value)}
-                    placeholder={generalTruenasApiKeySet ? t('apiKeyPlaceholderKeep', language) : t('apiKeyPlaceholder', language)}
-                    className="w-full px-4 py-2 border border-slate-200 rounded-lg text-sm"
-                  />
-                </div>
-                <div className="bg-white p-6 rounded-2xl border border-slate-200">
-                  <h3 className="font-bold text-slate-800 mb-3">{t('aiAssistantApiKey', language)}</h3>
-                  <p className="text-sm text-slate-500 mb-2">{t('aiAssistantApiKeyDesc', language)}</p>
-                  <input
-                    type="password"
-                    value={generalAiKey}
-                    onChange={(e) => setGeneralAiKey(e.target.value)}
-                    placeholder={geminiKeySet ? t('apiKeyPlaceholderKeep', language) : t('apiKeyPlaceholder', language)}
-                    className="w-full px-4 py-2 border border-slate-200 rounded-lg text-sm"
-                  />
-                </div>
-                <div className="bg-white p-6 rounded-2xl border border-slate-200">
-                  <h3 className="font-bold text-slate-800 mb-3">{t('mountPath', language)}</h3>
-                  <p className="text-sm text-slate-500 mb-2">{t('mountPathDesc', language)}</p>
-                  <input
-                    type="text"
-                    value={generalMountPath}
-                    onChange={(e) => setGeneralMountPath(e.target.value)}
-                    placeholder="/data"
-                    className="w-full px-4 py-2 border border-slate-200 rounded-lg text-sm"
-                  />
+                  <h3 className="font-bold text-slate-800 mb-2">Compose .env</h3>
+                  <p className="text-sm text-slate-500 mb-4">
+                    Save these to <code className="bg-slate-100 px-1 rounded">.env</code> in the data directory. Restart the container for env changes (TrueNAS, AI keys) to apply.
+                  </p>
+                  <div className="space-y-3 mb-4">
+                    <label className="block text-sm font-medium text-slate-700">MOUNT_PATH</label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={envFileVars.MOUNT_PATH ?? ''}
+                        onChange={(e) => setEnvFileVars((v) => ({ ...v, MOUNT_PATH: e.target.value }))}
+                        placeholder="/data or /mnt/pool/share"
+                        className="flex-1 min-w-0 px-4 py-2 border border-slate-200 rounded-lg text-sm bg-white text-slate-800"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBrowseModalOpen(true);
+                          setBrowsePath('');
+                          setBrowseLoading(true);
+                        fetch(`/api/browse?path=`)
+                          .then((r) => (r.ok ? r.json() : null))
+                          .then((d) => {
+                            if (d) {
+                              setBrowseRoot(d.root ?? '');
+                              setBrowsePath(d.path === '/' ? '' : (d.path ?? ''));
+                              setBrowseItems(Array.isArray(d.items) ? d.items : []);
+                            }
+                          })
+                            .catch(() => setBrowseItems([]))
+                            .finally(() => setBrowseLoading(false));
+                        }}
+                        className="px-4 py-2 border border-slate-200 rounded-lg text-sm font-medium hover:bg-slate-50 shrink-0 bg-white text-slate-800"
+                      >
+                        Browse
+                      </button>
+                    </div>
+                    <label className="block text-sm font-medium text-slate-700">TRUENAS_URL</label>
+                    <input
+                      type="text"
+                      value={envFileVars.TRUENAS_URL ?? ''}
+                      onChange={(e) => setEnvFileVars((v) => ({ ...v, TRUENAS_URL: e.target.value }))}
+                      placeholder="https://truenas.example.com"
+                      className="w-full px-4 py-2 border border-slate-200 rounded-lg text-sm bg-white text-slate-800"
+                    />
+                    <label className="block text-sm font-medium text-slate-700">TRUENAS_API_KEY</label>
+                    <input
+                      type="password"
+                      value={envFileVars.TRUENAS_API_KEY ?? ''}
+                      onChange={(e) => setEnvFileVars((v) => ({ ...v, TRUENAS_API_KEY: e.target.value }))}
+                      placeholder="API key"
+                      className="w-full px-4 py-2 border border-slate-200 rounded-lg text-sm bg-white text-slate-800"
+                    />
+                    <label className="block text-sm font-medium text-slate-700">GEMINI_API_KEY</label>
+                    <input
+                      type="password"
+                      value={envFileVars.GEMINI_API_KEY ?? ''}
+                      onChange={(e) => setEnvFileVars((v) => ({ ...v, GEMINI_API_KEY: e.target.value }))}
+                      placeholder="Gemini API key"
+                      className="w-full px-4 py-2 border border-slate-200 rounded-lg text-sm bg-white text-slate-800"
+                    />
+                    <label className="block text-sm font-medium text-slate-700">NETDATA_URL (optional)</label>
+                    <input
+                      type="text"
+                      value={envFileVars.NETDATA_URL ?? ''}
+                      onChange={(e) => setEnvFileVars((v) => ({ ...v, NETDATA_URL: e.target.value }))}
+                      placeholder="http://host.docker.internal:19999"
+                      className="w-full px-4 py-2 border border-slate-200 rounded-lg text-sm bg-white text-slate-800"
+                    />
+                  </div>
+                  {envFilePath && <p className="text-xs text-slate-500">File: {envFilePath}</p>}
                 </div>
                 <button
                   type="button"
                   disabled={generalSaving}
                   onClick={async () => {
+                    if (envVarsChanged(envFileVars, initialEnvVarsRef.current)) {
+                      setShowRestartConfirmModal(true);
+                      return;
+                    }
                     setGeneralSaving(true);
                     try {
-                      const body: Record<string, unknown> = {
-                        language: generalLanguage,
-                        timezone: generalTimezone,
-                        truenasUrl: generalTruenasUrl,
-                        mountPath: generalMountPath,
-                      };
-                      if (generalTruenasApiKey) body.truenasApiKey = generalTruenasApiKey;
-                      const res = await fetch('/api/settings/general', {
-                        method: 'PUT',
-                        credentials: 'include',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(body),
-                      });
-                      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Failed');
-                      if (generalAiKey) {
-                        await saveGeminiKey(generalAiKey);
-                        setGeminiKeySet(true);
-                        setGeneralAiKey('');
-                      }
-                      if (generalTruenasApiKey) {
-                        setGeneralTruenasApiKeySet(true);
-                        setGeneralTruenasApiKey('');
-                      }
+                      const [generalRes, envRes] = await Promise.all([
+                        fetch('/api/settings/general', {
+                          method: 'PUT',
+                          credentials: 'include',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                            language: generalLanguage,
+                            timezone: generalTimezone,
+                          }),
+                        }),
+                        fetch('/api/settings/env-file', {
+                          method: 'PUT',
+                          credentials: 'include',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ vars: envFileVars }),
+                        }),
+                      ]);
+                      const generalData = await generalRes.json().catch(() => ({}));
+                      const envData = await envRes.json().catch(() => ({}));
+                      if (!generalRes.ok) throw new Error(generalData.error || 'Failed to save general');
+                      if (!envRes.ok) throw new Error(envData.error || 'Failed to save .env');
+                      if (envData.path) setEnvFilePath(envData.path);
                       setTimezone(generalTimezone);
                       setLanguage(generalLanguage);
-                      addNotification('Saved', 'General settings updated.', 'success');
+                      initialEnvVarsRef.current = { ...envFileVars };
+                      addNotification('Saved', 'General settings and .env have been saved.', 'success');
                     } catch (e) {
                       addNotification('Error', e instanceof Error ? e.message : 'Failed to save.', 'error');
                     }
@@ -556,8 +591,8 @@ const ControlPanel: React.FC = () => {
             <div className="flex items-center justify-between flex-wrap gap-2">
               <h1 className="text-2xl font-bold text-slate-800">System Overview</h1>
               <div className="flex items-center gap-2 flex-wrap">
-                {systemSource === 'netdata' && (
-                  <span className="bg-sky-100 text-sky-700 px-3 py-1 rounded-full text-xs font-bold">Netdata</span>
+                {systemSource === 'truenas' && (
+                  <span className="bg-sky-100 text-sky-700 px-3 py-1 rounded-full text-xs font-bold">TrueNAS</span>
                 )}
                 <div className="flex items-center gap-2 bg-emerald-100 text-emerald-700 px-3 py-1 rounded-full text-xs font-bold">
                   <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
@@ -804,7 +839,7 @@ const ControlPanel: React.FC = () => {
                       <Layers size={16} /> RAID / Storage Pools
                     </h3>
                     <p className="text-sm text-slate-500">
-                      Host RAID is not visible in Docker. To show <strong>TrueNAS</strong> storage pools, set <code className="text-xs bg-slate-100 px-1 rounded">TRUENAS_URL</code> and <code className="text-xs bg-slate-100 px-1 rounded">TRUENAS_API_KEY</code> in General settings or in docker-compose, then restart the container.
+                      Host RAID is not visible in Docker. To show <strong>TrueNAS</strong> storage pools, set <code className="text-xs bg-slate-100 px-1 rounded">TRUENAS_URL</code> and <code className="text-xs bg-slate-100 px-1 rounded">TRUENAS_API_KEY</code> in your environment (e.g. docker-compose), then restart the container.
                     </p>
                   </div>
                 )}
@@ -1045,36 +1080,12 @@ const ControlPanel: React.FC = () => {
                 <Bot size={18} /> Gemini API Key
               </h3>
               <p className="text-sm text-slate-500 mb-4">
-                Enter the API key from Google AI Studio for AI Assistant (Gemini). The key is stored encrypted on the server.
+                The API key is read from the <code className="bg-slate-100 px-1 rounded">GEMINI_API_KEY</code> environment variable. Set it in docker-compose or your environment and restart the server.
               </p>
-              <div className="flex flex-col sm:flex-row gap-3">
-                <input
-                  type="password"
-                  value={aiApiKeyInput}
-                  onChange={(e) => setAiApiKeyInput(e.target.value)}
-                  placeholder={geminiKeySet ? '••••••••••••••••' : 'API key'}
-                  className="flex-1 px-4 py-2.5 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-                  autoComplete="off"
-                />
-                <button
-                  type="button"
-                  onClick={async () => {
-                    try {
-                      await saveGeminiKey(aiApiKeyInput);
-                      setAiApiKeyInput('');
-                      setGeminiKeySet(true);
-                      addNotification('Saved', 'AI Assistant API key has been stored encrypted.', 'success');
-                    } catch (e) {
-                      addNotification('Save failed', e instanceof Error ? e.message : 'Failed to save', 'warning');
-                    }
-                  }}
-                  className="px-4 py-2.5 bg-blue-600 text-white rounded-xl text-sm font-medium hover:bg-blue-700 transition-colors shrink-0"
-                >
-                  Save
-                </button>
-              </div>
-              {geminiKeySet && (
-                <p className="text-xs text-emerald-600 mt-2 font-medium">API key is set. Enter a new key above and save to replace.</p>
+              {geminiKeySet ? (
+                <p className="text-sm text-emerald-600 font-medium">API key is set (from environment).</p>
+              ) : (
+                <p className="text-sm text-amber-600 font-medium">API key is not set. Set GEMINI_API_KEY to use AI Assistant.</p>
               )}
             </div>
           </div>
@@ -1282,77 +1293,6 @@ const ControlPanel: React.FC = () => {
             </div>
           </div>
         );
-      case 'network':
-        return (
-          <div className="space-y-6 animate-in fade-in duration-300">
-            <div className="flex items-center justify-between flex-wrap gap-2">
-              <h1 className="text-2xl font-bold text-slate-800">Network Settings</h1>
-              {networkData?.source === 'truenas' && (
-                <span className="text-xs font-medium text-blue-600 bg-blue-50 px-2 py-1 rounded">From TrueNAS</span>
-              )}
-            </div>
-            <div className="bg-white p-6 rounded-2xl border border-slate-200 space-y-4">
-              {networkLoading && (
-                <p className="text-sm text-slate-500">Loading...</p>
-              )}
-              {!networkLoading && networkData && (
-                <>
-                  <div className="flex justify-between items-center p-3 hover:bg-slate-50 rounded-xl transition-colors">
-                    <div className="flex items-center gap-3">
-                      <Wifi size={20} className="text-blue-500" />
-                      <div>
-                        <p className="font-bold">Hostname</p>
-                        <p className="text-xs text-slate-400 font-mono">{networkData.hostname}</p>
-                      </div>
-                    </div>
-                  </div>
-                  {networkData.interfaces.length > 0 && (
-                    <div className="p-3">
-                      <p className="font-bold text-slate-800 mb-2">Network Interfaces</p>
-                      <ul className="space-y-2">
-                        {networkData.interfaces.map((iface, i) => (
-                          <li key={`${iface.name}-${i}`} className="flex justify-between items-center py-2 border-b border-slate-100 last:border-0">
-                            <span className="text-sm font-medium text-slate-700">{iface.name}</span>
-                            <span className="text-xs font-mono text-slate-500">{iface.address}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  <div className="flex justify-between items-center p-3 hover:bg-slate-50 rounded-xl transition-colors">
-                    <div className="flex items-center gap-3">
-                      <Globe size={20} className="text-slate-400" />
-                      <div>
-                        <p className="font-bold">DNS Servers</p>
-                        <p className="text-xs text-slate-400 font-mono">
-                          {networkData.dns.length > 0 ? networkData.dns.join(', ') : '—'}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                  {networkData.networkStats?.byInterface && Object.keys(networkData.networkStats.byInterface).length > 0 && (
-                    <div className="p-3 border-t border-slate-100">
-                      <p className="font-bold text-slate-800 mb-2 flex items-center gap-2">
-                        Traffic (Netdata)
-                      </p>
-                      <ul className="space-y-1.5">
-                        {Object.entries(networkData.networkStats.byInterface).map(([label, value]) => (
-                          <li key={label} className="flex justify-between items-center text-sm">
-                            <span className="font-mono text-slate-600">{label}</span>
-                            <span className="text-slate-500">{typeof value === 'number' ? value.toLocaleString() : value}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </>
-              )}
-              {!networkLoading && !networkData && (
-                <p className="text-sm text-slate-500">Could not load network information from the server.</p>
-              )}
-            </div>
-          </div>
-        );
       case 'ports':
         return (
           <div className="space-y-6 animate-in fade-in duration-300">
@@ -1497,12 +1437,101 @@ const ControlPanel: React.FC = () => {
     { titleKey: 'menuGeneral' as const, items: [{ id: 'general', labelKey: 'general' as const, icon: Settings }] },
     { titleKey: 'menuSystemInfo' as const, items: [{ id: 'health', labelKey: 'health', icon: Activity }, { id: 'ports', labelKey: 'ports', icon: Globe }, { id: 'system-log', labelKey: 'systemLog', icon: FileText }] },
     { titleKey: 'menuUserAccess' as const, items: [{ id: 'users', labelKey: 'userAndGroups', icon: Users }, { id: 'login-settings', labelKey: 'requireLogin', icon: Lock, openModal: true }, { id: 'security', labelKey: 'security', icon: Shield }] },
-    { titleKey: 'menuPersonalization' as const, items: [{ id: 'display', labelKey: 'themeAndDisplay', icon: Monitor }, { id: 'network', labelKey: 'network', icon: Wifi }] },
+    { titleKey: 'menuPersonalization' as const, items: [{ id: 'display', labelKey: 'themeAndDisplay', icon: Monitor }] },
     { titleKey: 'menuServices' as const, items: [{ id: 'sftp', labelKey: 'sftp', icon: Server }, { id: 'update', labelKey: 'updateRestore', icon: RefreshCw }, { id: 'ai-assistant', labelKey: 'aiAssistant', icon: Bot }] },
   ];
 
   return (
     <>
+      {browseModalOpen && createPortal(
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50" onClick={() => setBrowseModalOpen(false)}>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[80vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-4 border-b border-slate-200">
+              <h3 className="font-bold text-slate-800">Select folder for mount path</h3>
+              <button type="button" onClick={() => setBrowseModalOpen(false)} className="p-1 rounded hover:bg-slate-100"><X size={20} /></button>
+            </div>
+            <div className="p-2 border-b border-slate-100 text-xs text-slate-500 font-mono truncate">
+              {(browseRoot || '/') + (browsePath ? `/${browsePath}`.replace(/\/+/g, '/') : '')}
+            </div>
+            <div className="flex-1 overflow-auto p-2 min-h-0">
+              {browseLoading ? (
+                <div className="flex items-center justify-center py-12"><Loader2 size={24} className="animate-spin text-slate-400" /></div>
+              ) : (
+                <ul className="space-y-0.5">
+                  {browsePath !== '' && browsePath !== '/' && (
+                    <li>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBrowseLoading(true);
+                          const parent = browsePath.replace(/[/\\][^/\\]+$/, '').replace(/[/\\]+$/, '') || '';
+                          fetch(`/api/browse?path=${encodeURIComponent(parent)}`)
+                            .then((r) => (r.ok ? r.json() : null))
+                            .then((d) => {
+                              if (d) {
+                                setBrowsePath(d.path === '/' ? '' : (d.path ?? ''));
+                                setBrowseItems(Array.isArray(d.items) ? d.items : []);
+                              }
+                            })
+                            .catch(() => {})
+                            .finally(() => setBrowseLoading(false));
+                        }}
+                        className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-slate-100 text-left text-sm"
+                      >
+                        <FolderOpen size={18} className="text-slate-400" /> ..
+                      </button>
+                    </li>
+                  )}
+                  {browseItems.map((item) => (
+                    <li key={item.path}>
+                      {item.type === 'folder' ? (
+                        <button
+                          type="button"
+                          onDoubleClick={() => {
+                            setBrowseLoading(true);
+                            fetch(`/api/browse?path=${encodeURIComponent(item.path)}`)
+                              .then((r) => (r.ok ? r.json() : null))
+                              .then((d) => {
+                                if (d) {
+                                  setBrowsePath(d.path === '/' ? '' : (d.path ?? ''));
+                                  setBrowseItems(Array.isArray(d.items) ? d.items : []);
+                                }
+                              })
+                              .catch(() => setBrowseItems([]))
+                              .finally(() => setBrowseLoading(false));
+                          }}
+                          className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-slate-100 text-left text-sm"
+                        >
+                          <Folder size={18} className="text-amber-500" /> {item.name}
+                        </button>
+                      ) : (
+                        <div className="flex items-center gap-2 px-3 py-2 text-slate-400 text-sm">
+                          <FileText size={18} /> {item.name}
+                        </div>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div className="p-4 border-t border-slate-200 flex gap-2 justify-end">
+              <button type="button" onClick={() => setBrowseModalOpen(false)} className="px-4 py-2 rounded-lg border border-slate-200 text-sm">Cancel</button>
+              <button
+                type="button"
+                onClick={() => {
+                  const full = browsePath ? `${browseRoot}/${browsePath}`.replace(/\/+/g, '/') : browseRoot || '/';
+                  setEnvFileVars((v) => ({ ...v, MOUNT_PATH: full }));
+                  setBrowseModalOpen(false);
+                }}
+                className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700"
+              >
+                Select this folder
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
       {show2FAGate && createPortal(
         <div
           className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/95"
@@ -1606,6 +1635,83 @@ const ControlPanel: React.FC = () => {
       {showLoginSettingsModal && (
         <LoginSettingsModal onClose={() => setShowLoginSettingsModal(false)} />
       )}
+      {showRestartConfirmModal &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+            style={{ top: 0, left: 0, right: 0, bottom: 0, minWidth: '100vw', minHeight: '100dvh' }}
+            onClick={() => setShowRestartConfirmModal(false)}
+            role="presentation"
+          >
+            <div
+              className="bg-white dark:bg-slate-800 rounded-2xl shadow-xl max-w-md w-full overflow-hidden border border-slate-200 dark:border-slate-700"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between p-6 border-b border-slate-200 dark:border-slate-700">
+                <h2 className="text-lg font-bold text-slate-800 dark:text-slate-100">환경 설정(.env) 변경</h2>
+                <button type="button" onClick={() => setShowRestartConfirmModal(false)} className="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-700">
+                  <X size={20} className="text-slate-600 dark:text-slate-300" />
+                </button>
+              </div>
+              <div className="p-6">
+                <p className="text-sm text-slate-600 dark:text-slate-300">
+                  저장 후 서버가 재시작되며 연결이 잠시 끊깁니다. 계속하시겠습니까?
+                </p>
+              </div>
+              <div className="p-6 border-t border-slate-200 dark:border-slate-700 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowRestartConfirmModal(false)}
+                  className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-600 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700"
+                >
+                  취소
+                </button>
+                <button
+                  type="button"
+                  disabled={generalSaving}
+                  onClick={async () => {
+                    setShowRestartConfirmModal(false);
+                    setGeneralSaving(true);
+                    try {
+                      const [generalRes, envRes] = await Promise.all([
+                        fetch('/api/settings/general', {
+                          method: 'PUT',
+                          credentials: 'include',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ language: generalLanguage, timezone: generalTimezone }),
+                        }),
+                        fetch('/api/settings/env-file', {
+                          method: 'PUT',
+                          credentials: 'include',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ vars: envFileVars }),
+                        }),
+                      ]);
+                      const generalData = await generalRes.json().catch(() => ({}));
+                      const envData = await envRes.json().catch(() => ({}));
+                      if (!generalRes.ok) throw new Error(generalData.error || 'Failed to save general');
+                      if (!envRes.ok) throw new Error(envData.error || 'Failed to save .env');
+                      if (envData.path) setEnvFilePath(envData.path);
+                      setTimezone(generalTimezone);
+                      setLanguage(generalLanguage);
+                      initialEnvVarsRef.current = { ...envFileVars };
+                      await fetch('/api/settings/restart-container', { method: 'POST', credentials: 'include' });
+                      addNotification('재시작 중', '서버가 재시작됩니다. 잠시 후 페이지를 새로고침 해 주세요.', 'success');
+                      setTimeout(() => window.location.reload(), 5000);
+                    } catch (e) {
+                      addNotification('Error', e instanceof Error ? e.message : 'Failed to save or restart.', 'error');
+                    }
+                    setGeneralSaving(false);
+                  }}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {generalSaving ? '저장 및 재시작 중…' : '저장 후 재시작'}
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
     </div>
     </>
   );

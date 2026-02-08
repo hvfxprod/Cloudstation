@@ -12,6 +12,13 @@ dist
 dist-ssr
 *.local
 
+# Env files
+.env
+.env.example
+.env.local
+.env.*.local
+data/.env
+
 # Server-stored encrypted API key (do not commit)
 .gemini_key.enc
 server/.gemini_key.enc

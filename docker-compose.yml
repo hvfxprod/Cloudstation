@@ -4,53 +4,22 @@ services:
     container_name: cloudstation-pro
     ports:
       - "9999:9999"
+    env_file:
+      - ./data/.env
     environment:
       - PORT=9999
       - DATA_PATH=/data
-      # SFTP: 호스트에서 마운트 경로 (SFTP 컨테이너 Binds용)
-      - SFTP_HOST_MOUNT_ROOT=/mnt/Theh_1/SMB_Share
-      # Netdata가 호스트에서 19999로 떠 있을 때 (host 네트워크) 접근용
-      - NETDATA_URL=http://host.docker.internal:19999
-      # TrueNAS 풀 상태 표시 (Health 탭)
-      - TRUENAS_URL=https://server1.hvfxprod.com
-      - TRUENAS_API_KEY=1-Q4n7HTPxg441GCrWhgOQfu8ZhJsrqFVy1GYkroGBHuqLId5UWVeXquyV8MLSMIcV
+      - CONTAINER_NAME=cloudstation-pro
+      - DRIVE_PATH=/drive
+      - MOUNT_BROWSE_ROOT=/host
+      - SFTP_HOST_MOUNT_ROOT=${MOUNT_PATH:-/data}
+      # TRUENAS_*, GEMINI_*, MOUNT_PATH come from env_file (./data/.env) only
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      # 호스트의 SMB 공유 경로를 컨테이너 /data 로 마운트
-      - /mnt/Theh_1/SMB_Share:/data
+      - ./data:/data
+      - .:/project
+      - ${MOUNT_PATH:-/data}:/drive
+      - /:/host:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
-
-  # Netdata: 호스트 CPU/RAM/디스크/네트워크 메트릭 수집 → Control Panel Health/Network에 연동
-  netdata:
-    image: netdata/netdata:stable
-    container_name: netdata
-    hostname: netdata
-    pid: host
-    network_mode: host
-    restart: unless-stopped
-    cap_add:
-      - SYS_PTRACE
-      - SYS_ADMIN
-    security_opt:
-      - apparmor=unconfined
-    volumes:
-      - netdataconfig:/etc/netdata
-      - netdatalib:/var/lib/netdata
-      - netdatacache:/var/cache/netdata
-      - /:/host/root:ro,rslave
-      - /etc/passwd:/host/etc/passwd:ro
-      - /etc/group:/host/etc/group:ro
-      - /etc/localtime:/etc/localtime:ro
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
-      - /etc/os-release:/host/etc/os-release:ro
-      - /var/log:/host/var/log:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /run/dbus:/run/dbus:ro
-
-volumes:
-  netdataconfig:
-  netdatalib:
-  netdatacache:
