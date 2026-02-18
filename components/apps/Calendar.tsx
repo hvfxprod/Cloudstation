@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ChevronLeft, ChevronRight, Plus, Trash2, X, Clock, Calendar as CalendarIcon } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Plus, Trash2, X, Clock, Calendar as CalendarIcon, Video, ExternalLink, Settings2 } from 'lucide-react';
 import { useOSStore } from '../../store';
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -16,6 +16,26 @@ const PASTEL_PREVIEW: Record<string, { bg: string; title: string; sub: string }>
 
 function getEventPreviewStyle(color: string | null | undefined) {
   return PASTEL_PREVIEW[color || 'bg-blue-500'] || PASTEL_PREVIEW['bg-blue-500'];
+}
+
+/** Generate a unique Jitsi Meet room URL (no account required). */
+function generateMeetingLink(): string {
+  const slug = `CloudStation-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  return `https://meet.jit.si/${slug}`;
+}
+
+/** Fetch "today" from internet time API (World Time API via our server). */
+async function fetchServerToday(tz: string): Promise<{ year: number; month: number; date: number } | null> {
+  try {
+    const res = await fetch(`/api/time/now?tz=${encodeURIComponent(tz || 'UTC')}`, { credentials: 'include' });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const { year, month, date } = data;
+    if (typeof year !== 'number' || typeof month !== 'number' || typeof date !== 'number') return null;
+    return { year, month, date };
+  } catch {
+    return null;
+  }
 }
 
 /** Format time input as user types: digits only, max 4, auto-insert ":" → HH:MM */
@@ -43,14 +63,14 @@ interface CalendarEvent {
   endTime?: string | null;
   color?: string | null;
   description?: string | null;
+  isMeeting?: boolean;
+  meetingLink?: string | null;
 }
 
 const Calendar: React.FC = () => {
   const timezone = useOSStore((s) => s.timezone) || 'UTC';
-  const [current, setCurrent] = useState(() => {
-    const d = new Date();
-    return { year: d.getFullYear(), month: d.getMonth() };
-  });
+  const [serverToday, setServerToday] = useState<{ year: number; month: number; date: number } | null>(null);
+  const [current, setCurrent] = useState<{ year: number; month: number }>({ year: 2026, month: 0 });
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState<{ type: 'add' | 'view'; date?: string; event?: CalendarEvent } | null>(null);
@@ -61,9 +81,14 @@ const Calendar: React.FC = () => {
   const [formEndTime, setFormEndTime] = useState('');
   const [formColor, setFormColor] = useState(EVENT_COLORS[0]);
   const [formDescription, setFormDescription] = useState('');
+  const [formIsMeeting, setFormIsMeeting] = useState(false);
+  const [formMeetingLink, setFormMeetingLink] = useState('');
   const [saving, setSaving] = useState(false);
   const [detailMemo, setDetailMemo] = useState('');
   const [savingMemo, setSavingMemo] = useState(false);
+  const [editingMeeting, setEditingMeeting] = useState(false);
+  const [editMeetingLink, setEditMeetingLink] = useState('');
+  const [savingMeeting, setSavingMeeting] = useState(false);
 
   const fetchEvents = async () => {
     const year = current.year;
@@ -88,12 +113,27 @@ const Calendar: React.FC = () => {
     fetchEvents();
   }, [current.year, current.month]);
 
+  // Fetch "today" from internet time API and sync calendar view to that month
+  useEffect(() => {
+    let cancelled = false;
+    fetchServerToday(timezone).then((t) => {
+      if (cancelled || !t) return;
+      setServerToday(t);
+      setCurrent((c) => {
+        if (c.year === t.year && c.month === t.month) return c;
+        return { year: t.year, month: t.month };
+      });
+    });
+    return () => { cancelled = true; };
+  }, [timezone]);
+
   const firstDay = new Date(current.year, current.month, 1).getDay();
   const daysInMonth = new Date(current.year, current.month + 1, 0).getDate();
   const prevMonth = () => setCurrent((c) => (c.month === 0 ? { year: c.year - 1, month: 11 } : { year: c.year, month: c.month - 1 }));
   const nextMonth = () => setCurrent((c) => (c.month === 11 ? { year: c.year + 1, month: 0 } : { year: c.year, month: c.month + 1 }));
 
   const monthLabel = new Date(current.year, current.month).toLocaleString('en-US', { month: 'long', year: 'numeric', timeZone: timezone });
+  const todayInTz = serverToday;
 
   const getEventsForDay = (day: number) => {
     const dateStr = `${current.year}-${String(current.month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
@@ -101,13 +141,22 @@ const Calendar: React.FC = () => {
   };
 
   const openAdd = (dateStr?: string) => {
-    const d = dateStr ? new Date(dateStr + 'T12:00:00') : new Date();
-    setFormDate(dateStr || `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
+    const defaultDate =
+      dateStr ||
+      (serverToday
+        ? `${serverToday.year}-${String(serverToday.month + 1).padStart(2, '0')}-${String(serverToday.date).padStart(2, '0')}`
+        : (() => {
+            const d = new Date();
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+          })());
+    setFormDate(defaultDate);
     setFormTitle('');
     setFormStartTime('');
     setFormEndTime('');
     setFormColor(EVENT_COLORS[0]);
     setFormDescription('');
+    setFormIsMeeting(false);
+    setFormMeetingLink('');
     setModal({ type: 'add', date: undefined });
   };
 
@@ -127,6 +176,8 @@ const Calendar: React.FC = () => {
           endTime: normalizeTime(formEndTime),
           color: formColor,
           description: formDescription.trim() || null,
+          isMeeting: formIsMeeting,
+          meetingLink: formMeetingLink.trim() || null,
         }),
       });
       if (!res.ok) throw new Error('Failed');
@@ -175,6 +226,40 @@ const Calendar: React.FC = () => {
   useEffect(() => {
     if (selectedEvent) setDetailMemo(selectedEvent.description ?? '');
   }, [selectedEvent?.id, selectedEvent?.description]);
+
+  useEffect(() => {
+    if (!selectedEvent) setEditingMeeting(false);
+  }, [selectedEvent]);
+
+  const openEditMeeting = () => {
+    setEditMeetingLink(selectedEvent?.meetingLink ?? '');
+    setEditingMeeting(true);
+  };
+
+  const handleSaveMeetingLink = async () => {
+    if (!selectedEvent || savingMeeting) return;
+    setSavingMeeting(true);
+    try {
+      const res = await fetch(`/api/calendar/events/${selectedEvent.id}`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          isMeeting: !!editMeetingLink.trim(),
+          meetingLink: editMeetingLink.trim() || null,
+        }),
+      });
+      if (!res.ok) throw new Error('Failed');
+      const data = await res.json();
+      const updated = data.event ?? { ...selectedEvent, meetingLink: editMeetingLink.trim() || null, isMeeting: !!editMeetingLink.trim() };
+      setSelectedEvent(updated);
+      setEvents((prev) => prev.map((e) => (e.id === selectedEvent.id ? updated : e)));
+      setEditingMeeting(false);
+    } catch {
+      // ignore
+    }
+    setSavingMeeting(false);
+  };
 
   const pad = firstDay;
   const totalCells = pad + daysInMonth;
@@ -229,9 +314,10 @@ const Calendar: React.FC = () => {
                 const dateStr = `${current.year}-${String(current.month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
                 const dayEvents = getEventsForDay(day);
                 const isToday =
-                  new Date().getFullYear() === current.year &&
-                  new Date().getMonth() === current.month &&
-                  new Date().getDate() === day;
+                  todayInTz != null &&
+                  todayInTz.year === current.year &&
+                  todayInTz.month === current.month &&
+                  todayInTz.date === day;
                 return (
                   <div
                     key={day}
@@ -262,7 +348,8 @@ const Calendar: React.FC = () => {
                             className={`w-full text-left rounded-lg px-2 py-1.5 ${style.bg} hover:opacity-90 transition-opacity border border-white/60 shadow-sm ${selectedEvent?.id === ev.id ? 'ring-2 ring-amber-500 ring-offset-1' : ''}`}
                             title={ev.title}
                           >
-                            <p className={`text-[11px] md:text-xs font-semibold leading-tight truncate ${style.title}`}>
+                            <p className={`text-[11px] md:text-xs font-semibold leading-tight truncate ${style.title} flex items-center gap-1`}>
+                              {ev.meetingLink && <Video size={10} className="shrink-0 opacity-80" />}
                               {ev.title}
                             </p>
                             {subtitle && (
@@ -300,14 +387,74 @@ const Calendar: React.FC = () => {
                 </button>
               </div>
               <div className="p-4 space-y-3 flex-1 min-h-0 flex flex-col">
-                {(selectedEvent.startTime || selectedEvent.endTime) && (
-                  <div className="flex items-center gap-2 text-slate-600">
-                    <Clock size={16} className="shrink-0 text-slate-400" />
-                    <span className="text-sm">
-                      {[selectedEvent.startTime, selectedEvent.endTime].filter(Boolean).join(' – ') || '—'}
-                    </span>
+                <div className="flex items-center gap-2 text-slate-600">
+                  {(selectedEvent.startTime || selectedEvent.endTime) ? (
+                    <>
+                      <Clock size={16} className="shrink-0 text-slate-400" />
+                      <span className="text-sm">
+                        {[selectedEvent.startTime, selectedEvent.endTime].filter(Boolean).join(' – ') || '—'}
+                      </span>
+                    </>
+                  ) : (
+                    <span className="text-sm text-slate-400">No time set</span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={openEditMeeting}
+                    className="ml-auto p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"
+                    title="Edit meeting link"
+                  >
+                    <Settings2 size={16} />
+                  </button>
+                </div>
+                {editingMeeting ? (
+                  <div className="space-y-2 p-3 rounded-xl bg-slate-50 border border-slate-200">
+                    <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Meeting link</label>
+                    <input
+                      type="url"
+                      value={editMeetingLink}
+                      onChange={(e) => setEditMeetingLink(e.target.value)}
+                      placeholder="Zoom, Google Meet, or generate a link"
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm"
+                      autoFocus
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setEditMeetingLink(generateMeetingLink())}
+                      className="text-xs font-medium text-blue-600 hover:text-blue-700"
+                    >
+                      + Generate meeting link (Jitsi)
+                    </button>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setEditingMeeting(false)}
+                        className="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 text-sm"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSaveMeetingLink}
+                        disabled={savingMeeting}
+                        className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-sm font-medium disabled:opacity-50"
+                      >
+                        {savingMeeting ? 'Saving…' : 'Save'}
+                      </button>
+                    </div>
                   </div>
-                )}
+                ) : selectedEvent.meetingLink ? (
+                  <a
+                    href={selectedEvent.meetingLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-center gap-2 w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium transition-colors"
+                  >
+                    <Video size={18} />
+                    Join meeting
+                    <ExternalLink size={14} />
+                  </a>
+                ) : null}
                 <div className="flex-1 min-h-0 flex flex-col">
                   <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5 block">Memo / Notes</label>
                   <textarea
@@ -393,6 +540,34 @@ const Calendar: React.FC = () => {
               rows={2}
               className="w-full px-4 py-2 border border-slate-200 rounded-lg text-sm mb-3 resize-y"
             />
+            <div className="flex items-center gap-3 mb-2">
+              <input
+                type="checkbox"
+                id="form-is-meeting"
+                checked={formIsMeeting}
+                onChange={(e) => setFormIsMeeting(e.target.checked)}
+                className="w-4 h-4 rounded border-slate-300 text-amber-500 focus:ring-amber-500"
+              />
+              <label htmlFor="form-is-meeting" className="text-sm font-medium text-slate-700">Meeting / Video call</label>
+            </div>
+            {formIsMeeting && (
+              <div className="mb-3">
+                <input
+                  type="url"
+                  value={formMeetingLink}
+                  onChange={(e) => setFormMeetingLink(e.target.value)}
+                  placeholder="Paste Zoom/Meet link or generate below"
+                  className="w-full px-4 py-2 border border-slate-200 rounded-lg text-sm mb-1.5"
+                />
+                <button
+                  type="button"
+                  onClick={() => setFormMeetingLink(generateMeetingLink())}
+                  className="text-xs font-medium text-blue-600 hover:text-blue-700"
+                >
+                  + Generate meeting link (Jitsi – no account)
+                </button>
+              </div>
+            )}
             <div className="flex gap-2 mb-4">
               {EVENT_COLORS.map((c) => (
                 <button

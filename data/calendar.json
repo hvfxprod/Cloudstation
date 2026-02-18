@@ -1,0 +1,26 @@
+{
+  "events": [
+    {
+      "id": "ev-1770623120549-weovksi",
+      "title": "회의 테스트콜",
+      "date": "2026-02-15",
+      "startTime": "09:00",
+      "endTime": "10:00",
+      "color": "bg-rose-500",
+      "description": "테스트 예약입니다",
+      "isMeeting": true,
+      "meetingLink": null
+    },
+    {
+      "id": "ev-1770709177934-5ae6wt9",
+      "title": "aaaaaa",
+      "date": "2026-02-10",
+      "startTime": "09:00",
+      "endTime": "10:00",
+      "color": "bg-blue-500",
+      "description": null,
+      "isMeeting": false,
+      "meetingLink": null
+    }
+  ]
+}

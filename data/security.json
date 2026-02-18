@@ -1,0 +1,15 @@
+{
+  "firewall": {
+    "enabled": false,
+    "rules": []
+  },
+  "twoFa": {
+    "enabled": false,
+    "secretEncrypted": null
+  },
+  "auth": {
+    "enabled": false,
+    "passwordHash": null,
+    "salt": null
+  }
+}
